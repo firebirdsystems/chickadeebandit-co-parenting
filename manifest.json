@@ -1,0 +1,118 @@
+{
+  "id": "co-parenting",
+  "name": "Co-Parenting",
+  "version": "1.0.0",
+  "description": "Shared custody coordination for split households — per-child schedules, countersigned schedule swaps, a tamper-evident message log, and handoff notes. Custody days flow to the household Calendar so kids always know where they are.",
+  "entrypoint": "index.html",
+  "runtime": "static",
+  "category": "family",
+  "tags": ["co-parenting", "custody", "schedule", "family"],
+  "data_access": {
+    "reads": ["family.members"],
+    "writes": []
+  },
+  "exports": ["calendar_events"],
+  "permissions": {
+    "default_audience": "adults",
+    "requires_approval": false
+  },
+  "storage": "db",
+  "db_plaintext_columns": [
+    "note_date",
+    "start_date",
+    "end_date",
+    "anchor_date",
+    "pattern",
+    "cycle",
+    "cycle_length",
+    "exchange_time"
+  ],
+  "partner_link": {
+    "table": "partner_config",
+    "member_column": "member_id",
+    "partner_id_column": "partner_id",
+    "session_id_column": "session_id",
+    "require_role": "adult"
+  },
+  "row_policies": {
+    "partner_config": {
+      "kind": "owner_only",
+      "member_column": "member_id",
+      "adults_bypass": false,
+      "endpoint_writes_only": true
+    },
+    "schedules": { "kind": "adult_writable" },
+    "overrides": { "kind": "adult_writable" },
+    "swap_requests": {
+      "kind": "party_scoped",
+      "member_columns": ["requester_id", "responder_id"],
+      "self_column": "requester_id"
+    },
+    "swap_agreements": {
+      "kind": "endpoint_only",
+      "read": "adult"
+    },
+    "messages": {
+      "kind": "couple_scoped",
+      "self_column": "author_id",
+      "participant_columns": ["author_id", "recipient_id"],
+      "partner_table": "partner_config",
+      "partner_member_column": "member_id",
+      "partner_id_column": "partner_id",
+      "require_reciprocal": true,
+      "endpoint_writes_only": true
+    },
+    "handoff_notes": {
+      "kind": "endpoint_only",
+      "read": "adult"
+    }
+  },
+  "append_only_records": {
+    "messages": {
+      "table": "messages",
+      "allowed_columns": ["recipient_id", "body"],
+      "writer_column": "author_id",
+      "created_at_column": "sent_at",
+      "write_acl": { "require_role": "adult" },
+      "max_text_lengths": { "body": 5000, "recipient_id": 120 }
+    },
+    "handoff_notes": {
+      "table": "handoff_notes",
+      "allowed_columns": ["child_id", "note_date", "category", "body"],
+      "writer_column": "created_by",
+      "created_at_column": "created_at",
+      "write_acl": { "require_role": "adult" },
+      "allowed_values": {
+        "category": ["health", "school", "mood", "items", "general"]
+      },
+      "max_text_lengths": { "child_id": 120, "note_date": 20, "category": 20, "body": 2000 }
+    }
+  },
+  "agreements": {
+    "swap_agreements": {
+      "participant_columns": ["requester_id", "responder_id"],
+      "agreement_columns": {
+        "requester_id": "requester_agreed",
+        "responder_id": "responder_agreed"
+      },
+      "status_column": "status",
+      "pending_value": "pending",
+      "locked_value": "locked",
+      "locked_at_column": "locked_at",
+      "updated_at_column": "updated_at",
+      "init_from_table": "swap_requests",
+      "init_columns": ["requester_id", "responder_id"]
+    }
+  },
+  "store_acls": {
+    "calendar_events": {
+      "write": { "require_role": "adult" }
+    }
+  },
+  "nav": { "label": "Co-Parenting" },
+  "widget": { "label": "Co-Parenting", "size": "small" },
+  "icon": "🧭",
+  "resource_limits": {
+    "max_db_bytes": 52428800
+  }
+}

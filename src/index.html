@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <base href="/run/co-parenting/" />
+  <title>Co-Parenting</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--hub-font, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      font-size: var(--hub-font-size, 15px);
+      background: var(--hub-bg, #f9fafb);
+      color: var(--hub-text, #111827);
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.35rem; margin: 0 0 2px; }
+    .sub { color: var(--hub-text-muted, #6b7280); font-size: 0.85rem; margin: 0 0 16px; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--hub-border, #e5e7eb); margin-bottom: 16px; overflow-x: auto; }
+    .tab { padding: 8px 14px; border: none; background: none; cursor: pointer; color: var(--hub-text-muted, #6b7280);
+      font-size: 0.9rem; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab.active { color: var(--hub-primary, #4f46e5); border-bottom-color: var(--hub-primary, #4f46e5); font-weight: 600; }
+
+    /* Cards */
+    .card { background: var(--hub-surface, #fff); border: 1px solid var(--hub-border, #e5e7eb);
+      border-radius: var(--hub-radius, 10px); padding: 14px; margin-bottom: 12px; }
+    .card h3 { margin: 0 0 8px; font-size: 1rem; }
+
+    .row { display: flex; align-items: center; gap: 8px; }
+    .spread { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .muted { color: var(--hub-text-muted, #6b7280); font-size: 0.85rem; }
+    .empty { text-align: center; color: var(--hub-text-muted, #6b7280); padding: 32px 16px; }
+
+    /* Buttons */
+    .btn { border: 1px solid var(--hub-border, #d1d5db); background: var(--hub-surface, #fff); color: var(--hub-text, #111827);
+      padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 0.88rem; }
+    .btn:hover { background: var(--hub-bg, #f3f4f6); }
+    .btn-primary { background: var(--hub-primary, #4f46e5); color: var(--hub-primary-fg, #fff); border-color: var(--hub-primary, #4f46e5); }
+    .btn-primary:hover { background: var(--hub-primary-hover, #4338ca); }
+    .btn-danger { color: #b91c1c; border-color: #fca5a5; }
+    .btn:disabled { opacity: 0.55; cursor: default; }
+    .btn-sm { padding: 4px 9px; font-size: 0.8rem; }
+
+    /* Avatars */
+    .avatar { width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 0.72rem; font-weight: 700; flex-shrink: 0; }
+
+    /* Calendar */
+    .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+    .cal-dow { text-align: center; font-size: 0.68rem; color: var(--hub-text-muted, #6b7280); padding: 2px 0; text-transform: uppercase; }
+    .cal-cell { aspect-ratio: 1 / 1; border-radius: 7px; padding: 3px 4px; font-size: 0.72rem; position: relative;
+      display: flex; flex-direction: column; justify-content: space-between; color: #1f2937; overflow: hidden; }
+    .cal-cell.empty-cell { background: transparent; }
+    .cal-cell .dnum { font-weight: 600; opacity: 0.85; }
+    .cal-cell .who { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
+    .cal-cell.today { outline: 2px solid var(--hub-primary, #4f46e5); outline-offset: -2px; }
+    .cal-cell .ov-dot { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #1f2937; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 0.8rem; }
+    .legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+
+    /* Child tabs (pills) */
+    .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pill { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--hub-border, #e5e7eb); background: var(--hub-surface,#fff);
+      cursor: pointer; font-size: 0.85rem; }
+    .pill.active { background: var(--hub-primary, #4f46e5); color: var(--hub-primary-fg, #fff); border-color: var(--hub-primary, #4f46e5); }
+
+    /* Messages */
+    .thread { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 55vh; overflow-y: auto; }
+    .msg { max-width: 78%; padding: 8px 11px; border-radius: 12px; font-size: 0.9rem; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
+    .msg .meta { font-size: 0.68rem; opacity: 0.7; margin-top: 4px; }
+    .msg.mine { align-self: flex-end; background: var(--hub-primary, #4f46e5); color: var(--hub-primary-fg, #fff); border-bottom-right-radius: 3px; }
+    .msg.theirs { align-self: flex-start; background: var(--hub-bg, #eef0f3); border-bottom-left-radius: 3px; }
+    .compose { display: flex; gap: 8px; align-items: flex-end; }
+    .compose textarea { flex: 1; }
+    .immutable-note { font-size: 0.75rem; color: var(--hub-text-muted, #6b7280); margin: 0 0 10px; }
+
+    /* Badges */
+    .badge { font-size: 0.7rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; }
+    .b-pending { background: #fef3c7; color: #92400e; }
+    .b-locked { background: #dcfce7; color: #166534; }
+    .b-declined { background: #fee2e2; color: #991b1b; }
+    .b-cancelled { background: #f3f4f6; color: #4b5563; }
+
+    /* Forms */
+    label.field { display: block; margin-bottom: 10px; font-size: 0.85rem; }
+    label.field > span { display: block; margin-bottom: 4px; color: var(--hub-text-muted, #6b7280); }
+    input, select, textarea { width: 100%; padding: 8px; border: 1px solid var(--hub-border, #d1d5db);
+      border-radius: 8px; font: inherit; background: var(--hub-surface, #fff); color: var(--hub-text, #111827); }
+    textarea { resize: vertical; min-height: 44px; }
+
+    /* Modal */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center;
+      justify-content: center; padding: 16px; z-index: 50; }
+    .modal { background: var(--hub-surface, #fff); border-radius: var(--hub-radius, 12px); padding: 18px;
+      max-width: 440px; width: 100%; max-height: 90vh; overflow-y: auto; }
+    .modal h3 { margin: 0 0 14px; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+    .radio-list label { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--hub-border, #e5e7eb);
+      border-radius: 8px; margin-bottom: 6px; cursor: pointer; }
+    .radio-list input { width: auto; }
+    .hint { font-size: 0.78rem; color: var(--hub-text-muted, #6b7280); margin-top: -4px; margin-bottom: 10px; }
+    .note-cat { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 5px;
+      background: var(--hub-bg, #eef0f3); color: var(--hub-text-muted, #4b5563); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🧭 Co-Parenting</h1>
+    <p class="sub">Custody schedule, swaps, and a shared record — kept straight between two homes.</p>
+    <div id="tabs" class="tabs"></div>
+    <div id="content"></div>
+  </div>
+
+  <script type="module">
+    import {
+      memberColor, initial, esc, isAdult, hubConfirm, hubAlert,
+      sendHubNotification, hubAppUrl,
+    } from "/hub-sdk.js";
+    import {
+      effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
+    } from "./logic.js";
+
+    // ── Runtime globals ──────────────────────────────────────────────────────
+    const CONTEXT       = window.__CONTEXT_URL       ?? "";
+    const DB            = window.__DB_URL            ?? "";
+    const STORE         = window.__STORE_URL         ?? "";
+    const APPEND_RECORD = window.__APPEND_RECORD_URL ?? "";
+    const APP_ID        = window.__APP_ID            ?? "co-parenting";
+    const P             = "app_co_parenting__";       // table prefix
+
+    async function db(sql, params = []) {
+      if (!DB) return { rows: [] };
+      const res = await fetch(DB, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, params }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `DB error ${res.status}`);
+      return res.json();
+    }
+
+    function todayStr() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    }
+
+    // ── State ────────────────────────────────────────────────────────────────
+    let me = window.__CURRENT_MEMBER ?? null;   // may be replaced with a demo adult below
+    let members = [], memberMap = new Map();
+    let partnerId = null, partnerReciprocal = false;
+    let schedules = [], overrides = [], swaps = [], messages = [], handoffs = [];
+    let view = "schedule";
+    let currentChildId = null;
+    let calMonth = null;                         // { y, m } (m is 0-based)
+    const DEMO = !DB;
+
+    function memberName(id) { return memberMap.get(id)?.name ?? "Unknown"; }
+    function childIds() { return [...new Set(schedules.map(s => s.child_id))]; }
+    function adults() { return members.filter(m => isAdult(m, members)); }
+    const canManage = () => !!me && isAdult(me, members);   // mirrors adult_writable / write_acl:adult
+
+    // ── Loading ──────────────────────────────────────────────────────────────
+    async function loadMembers() {
+      if (!CONTEXT) {
+        members = [
+          { id: "demo-dad", name: "Dad", role: "adult" },
+          { id: "demo-mom", name: "Mom", role: "adult" },
+          { id: "demo-sam", name: "Sam", role: "child" },
+        ];
+        me = me ?? members[0];
+        memberMap = new Map(members.map(m => [m.id, m]));
+        return;
+      }
+      try {
+        const res = await fetch(`${CONTEXT}?keys=family.members`);
+        members = ((await res.json())["family.members"]) ?? [];
+      } catch { members = []; }
+      memberMap = new Map(members.map(m => [m.id, m]));
+    }
+
+    async function loadPartner() {
+      if (DEMO) { partnerId = "demo-mom"; partnerReciprocal = true; return; }
+      try {
+        const res = await fetch(`/run/${APP_ID}/api/partner`);
+        const status = res.ok ? await res.json() : {};
+        partnerId = status.partner_id ?? null;
+        partnerReciprocal = !!status.reciprocal;
+      } catch { partnerId = null; partnerReciprocal = false; }
+    }
+
+    async function loadData() {
+      if (DEMO) { seedDemo(); return; }
+      const [sch, ov] = await Promise.all([
+        db(`SELECT * FROM ${P}schedules WHERE status = 'active'`),
+        db(`SELECT * FROM ${P}overrides`),
+      ]);
+      schedules = sch.rows; overrides = ov.rows;
+
+      // swap_requests (party_scoped) and swap_agreements (endpoint_only) are both
+      // governed tables — a JOIN across them is rejected — so load both and merge by id.
+      const [sr, sa] = await Promise.all([
+        db(`SELECT * FROM ${P}swap_requests ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+        db(`SELECT * FROM ${P}swap_agreements`).catch(() => ({ rows: [] })),
+      ]);
+      const agrById = new Map(sa.rows.map(a => [a.id, a]));
+      swaps = sr.rows.map(r => mergeSwap(r, agrById.get(r.id)));
+
+      if (canManage()) {
+        const [msg, hn] = await Promise.all([
+          db(`SELECT * FROM ${P}messages ORDER BY sent_at ASC`).catch(() => ({ rows: [] })),
+          db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`).catch(() => ({ rows: [] })),
+        ]);
+        messages = msg.rows; handoffs = hn.rows;
+      }
+    }
+
+    function mergeSwap(r, agr) {
+      const locked = agr?.status === "locked";
+      const status = (r.status === "declined" || r.status === "cancelled") ? r.status : (locked ? "locked" : "pending");
+      return {
+        ...r, status,
+        requester_agreed: agr?.requester_agreed ? 1 : 0,
+        responder_agreed: agr?.responder_agreed ? 1 : 0,
+        locked_at: agr?.locked_at ?? null,
+      };
+    }
+
+    // ── Demo seed ────────────────────────────────────────────────────────────
+    function seedDemo() {
+      // Anchor on the Monday of last week so "today" lands mid-rotation.
+      const dow = new Date().getDay();               // 0=Sun
+      const anchor = addDays(todayStr(), -(((dow + 6) % 7) + 7));
+      schedules = [{
+        id: "demo-sch", child_id: "demo-sam", pattern: "alternating_weeks",
+        cycle: null, cycle_length: null, anchor_date: anchor,
+        parent_a_id: "demo-dad", parent_b_id: "demo-mom", exchange_time: "17:00",
+        status: "active", created_by: "demo-dad", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+      }];
+      overrides = [];
+      swaps = [{
+        id: "demo-swap", requester_id: "demo-mom", responder_id: "demo-dad", child_id: "demo-sam",
+        start_date: addDays(todayStr(), 10), end_date: addDays(todayStr(), 12), to_parent_id: "demo-mom",
+        note: "School play weekend", status: "pending", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+        requester_agreed: 1, responder_agreed: 0, locked_at: null,
+      }];
+      messages = [
+        { id: "m1", author_id: "demo-mom", recipient_id: "demo-dad", body: "Sam has a dentist appt Thursday at 4.", sent_at: addDays(todayStr(), -2) + "T14:03:00Z" },
+        { id: "m2", author_id: "demo-dad", recipient_id: "demo-mom", body: "Thanks — I'll take him and send the paperwork.", sent_at: addDays(todayStr(), -2) + "T15:20:00Z" },
+      ];
+      handoffs = [
+        { id: "h1", child_id: "demo-sam", note_date: addDays(todayStr(), 1), category: "items", body: "Soccer cleats + shin guards in his blue bag.", created_by: "demo-mom", created_at: "2026-01-01T00:00:00Z" },
+        { id: "h2", child_id: "demo-sam", note_date: todayStr(), category: "health", body: "Allergy meds each morning with breakfast.", created_by: "demo-dad", created_at: "2026-01-01T00:00:00Z" },
+      ];
+    }
+
+    // ── Calendar export ──────────────────────────────────────────────────────
+    async function publishCalendar() {
+      if (!STORE) return;
+      if (me && !isAdult(me, members)) return; // store_acls write:adult — a non-adult would 403
+      const start = todayStr();
+      const events = buildCalendarEvents(schedules, overrides, {
+        startDate: start, endDate: addDays(start, 90),
+        childName: memberName, parentName: memberName,
+      });
+      fetch(STORE, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: "calendar_events", value: JSON.stringify(events) }),
+      }).catch(() => {});
+    }
+
+    // ── Endpoints ────────────────────────────────────────────────────────────
+    async function appendRecord(name, data) {
+      const res = await fetch(`${APPEND_RECORD}/${encodeURIComponent(name)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) throw new Error(json.error || "Could not save");
+      return json;
+    }
+
+    async function agree(id, agreed) {
+      const res = await fetch(`/run/${APP_ID}/api/agree`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: "swap_agreements", id, agreed }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not record agreement");
+    }
+
+    function notifyPartner(title, body, params) {
+      if (!partnerId) return;
+      sendHubNotification({ title, body, audience: [partnerId], url: hubAppUrl(APP_ID, params) }).catch(() => {});
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Rendering
+    // ══════════════════════════════════════════════════════════════════════════
+    const TABS = [
+      ["schedule", "📅 Schedule"],
+      ["swaps",    "🔄 Swaps"],
+      ["messages", "💬 Messages"],
+      ["handoffs", "📋 Handoffs"],
+      ["setup",    "⚙️ Setup"],
+    ];
+
+    function render() {
+      const tabsEl = document.getElementById("tabs");
+      tabsEl.innerHTML = TABS.map(([id, label]) =>
+        `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${esc(label)}</button>`
+      ).join("");
+      tabsEl.querySelectorAll("[data-tab]").forEach(b =>
+        b.addEventListener("click", () => { view = b.dataset.tab; render(); }));
+
+      const el = document.getElementById("content");
+      ({ schedule: renderSchedule, swaps: renderSwaps, messages: renderMessages,
+         handoffs: renderHandoffs, setup: renderSetup }[view] ?? renderSchedule)(el);
+    }
+
+    // ── Schedule view ────────────────────────────────────────────────────────
+    function renderSchedule(el) {
+      if (!schedules.length) {
+        el.innerHTML = `<div class="empty">No custody schedule yet.<br><br>
+          ${canManage() ? `<button class="btn btn-primary" data-goto="setup">Set up a schedule</button>` : `Ask a parent to set one up.`}</div>`;
+        el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
+        return;
+      }
+      const kids = childIds();
+      if (!currentChildId || !kids.includes(currentChildId)) currentChildId = kids[0];
+      const sch = schedules.find(s => s.child_id === currentChildId);
+      if (!calMonth) { const d = new Date(); calMonth = { y: d.getFullYear(), m: d.getMonth() }; }
+
+      const pills = kids.map(cid =>
+        `<button class="pill ${cid === currentChildId ? "active" : ""}" data-child="${esc(cid)}">${esc(memberName(cid))}</button>`
+      ).join("");
+      const colA = memberColor(sch.parent_a_id, members);
+      const colB = memberColor(sch.parent_b_id, members);
+      const monthName = new Date(calMonth.y, calMonth.m, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
+
+      el.innerHTML = `
+        <div class="pills">${pills}</div>
+        <div class="card">
+          <div class="cal-head">
+            <button class="btn btn-sm" data-nav="-1">‹</button>
+            <strong>${esc(monthName)}</strong>
+            <button class="btn btn-sm" data-nav="1">›</button>
+          </div>
+          <div class="cal-grid">
+            ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d => `<div class="cal-dow">${d}</div>`).join("")}
+            ${renderMonthCells(sch, colA, colB)}
+          </div>
+          <div class="legend">
+            <span><span class="sw" style="background:${colA}"></span>${esc(memberName(sch.parent_a_id))}</span>
+            <span><span class="sw" style="background:${colB}"></span>${esc(memberName(sch.parent_b_id))}</span>
+            <span><span class="ov-dot" style="position:static;display:inline-block"></span> swap / override</span>
+          </div>
+          <p class="muted" style="margin:10px 0 0">${esc(patternLabel(sch))}${sch.exchange_time ? " · exchange at " + esc(sch.exchange_time) : ""}</p>
+        </div>
+        ${canManage() ? `<button class="btn btn-primary" data-newswap>Propose a swap</button>` : ""}`;
+
+      el.querySelectorAll("[data-child]").forEach(b =>
+        b.addEventListener("click", () => { currentChildId = b.dataset.child; render(); }));
+      el.querySelectorAll("[data-nav]").forEach(b =>
+        b.addEventListener("click", () => {
+          let m = calMonth.m + parseInt(b.dataset.nav, 10), y = calMonth.y;
+          if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
+          calMonth = { y, m }; render();
+        }));
+      el.querySelector("[data-newswap]")?.addEventListener("click", () => openSwapModal(sch.child_id));
+    }
+
+    function renderMonthCells(sch, colA, colB) {
+      const first = new Date(calMonth.y, calMonth.m, 1);
+      const daysInMonth = new Date(calMonth.y, calMonth.m + 1, 0).getDate();
+      let cells = "";
+      for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty-cell"></div>`;
+      for (let d = 1; d <= daysInMonth; d++) {
+        const date = `${calMonth.y}-${String(calMonth.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        const eff = effectiveForDate(sch, overrides, date);
+        const bg = eff.parent_id === sch.parent_a_id ? colA : eff.parent_id === sch.parent_b_id ? colB : "transparent";
+        const tint = bg === "transparent" ? "" : `background:${bg}22`;
+        const who = eff.parent_id ? esc(initial(memberName(eff.parent_id))) : "";
+        cells += `<div class="cal-cell ${date === todayStr() ? "today" : ""}" style="${tint}" title="${esc(memberName(eff.parent_id))}">
+          ${eff.source === "override" ? `<span class="ov-dot"></span>` : ""}
+          <span class="dnum">${d}</span>
+          <span class="who" style="color:${bg === "transparent" ? "inherit" : bg}">${who}</span>
+        </div>`;
+      }
+      return cells;
+    }
+
+    function patternLabel(sch) {
+      if (sch.pattern === "alternating_weeks") return "Alternating weeks";
+      if (sch.pattern === "two_two_three") return "2-2-3 rotation";
+      if (sch.pattern === "custom") return `Custom ${normalizeCycle(sch.cycle).length}-day cycle`;
+      return sch.pattern;
+    }
+
+    // ── Swaps view ───────────────────────────────────────────────────────────
+    function renderSwaps(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">Swaps are managed by the parents.</div>`; return; }
+      const list = schedules.length
+        ? (swaps.length ? swaps.map(swapCard).join("") : `<div class="empty">No swap requests yet.</div>`)
+        : `<div class="empty">Add a custody schedule in Setup before proposing swaps.</div>`;
+      el.innerHTML = `
+        <div class="spread" style="margin-bottom:12px">
+          <span class="muted">Both parents must agree before a swap changes the calendar.</span>
+          ${schedules.length ? `<button class="btn btn-primary btn-sm" data-newswap>+ New swap</button>` : ""}
+        </div>
+        ${list}`;
+      el.querySelector("[data-newswap]")?.addEventListener("click", () => openSwapModal(childIds()[0]));
+      el.querySelectorAll("[data-agree]").forEach(b => b.addEventListener("click", () => onAgree(b.dataset.agree)));
+      el.querySelectorAll("[data-decline]").forEach(b => b.addEventListener("click", () => onDecline(b.dataset.decline)));
+      el.querySelectorAll("[data-cancel]").forEach(b => b.addEventListener("click", () => onCancel(b.dataset.cancel)));
+    }
+
+    function swapCard(s) {
+      const mine = me && s.requester_id === me.id;
+      const iAmResponder = me && s.responder_id === me.id;
+      const badge = { pending: "b-pending", locked: "b-locked", declined: "b-declined", cancelled: "b-cancelled" }[s.status];
+      let actions = "";
+      if (s.status === "pending") {
+        if (iAmResponder && !s.responder_agreed) {
+          actions = `<button class="btn btn-primary btn-sm" data-agree="${esc(s.id)}">Agree</button>
+                     <button class="btn btn-danger btn-sm" data-decline="${esc(s.id)}">Decline</button>`;
+        } else if (mine) {
+          actions = `<span class="muted">${s.requester_agreed ? "Waiting for the other parent…" : ""}</span>
+                     <button class="btn btn-sm" data-cancel="${esc(s.id)}">Cancel</button>`;
+        }
+      }
+      const label = s.status === "locked" ? "confirmed" : s.status;
+      return `<div class="card">
+        <div class="spread">
+          <strong>${esc(memberName(s.child_id))} → ${esc(memberName(s.to_parent_id))}</strong>
+          <span class="badge ${badge}">${esc(label)}</span>
+        </div>
+        <p class="muted" style="margin:4px 0">${esc(fmtRange(s.start_date, s.end_date))}</p>
+        ${s.note ? `<p style="margin:4px 0">${esc(s.note)}</p>` : ""}
+        <p class="muted" style="margin:4px 0 8px">Proposed by ${esc(memberName(s.requester_id))} · to ${esc(memberName(s.responder_id))}</p>
+        <div class="row" style="justify-content:flex-end">${actions}</div>
+      </div>`;
+    }
+
+    function fmtRange(a, b) {
+      const f = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      return a === b ? f(a) : `${f(a)} – ${f(b)}`;
+    }
+
+    // ── Messages view ────────────────────────────────────────────────────────
+    function renderMessages(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">The message log is private to the two parents.</div>`; return; }
+      if (!partnerId || !partnerReciprocal) {
+        el.innerHTML = `<div class="empty">Pair with your co-parent in <b>Setup</b> to start a message log.
+          <br><br><button class="btn btn-primary" data-goto="setup">Go to Setup</button></div>`;
+        el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
+        return;
+      }
+      const thread = messages.length ? messages.map(m => {
+        const mine = me && m.author_id === me.id;
+        return `<div class="msg ${mine ? "mine" : "theirs"}">
+          <div>${esc(m.body)}</div>
+          <div class="meta">${esc(mine ? "You" : memberName(m.author_id))} · ${esc(fmtDateTime(m.sent_at))}</div>
+        </div>`;
+      }).join("") : `<div class="empty">No messages yet. Say hello to ${esc(memberName(partnerId))}.</div>`;
+
+      el.innerHTML = `
+        <p class="immutable-note">🔒 Messages are permanent — they can't be edited or deleted, so this stays a trustworthy record for both of you.</p>
+        <div class="thread">${thread}</div>
+        <div class="compose">
+          <textarea id="msg-body" data-autofocus placeholder="Message ${esc(memberName(partnerId))}…" maxlength="5000"></textarea>
+          <button class="btn btn-primary" id="msg-send">Send</button>
+        </div>`;
+      el.querySelector("#msg-send").addEventListener("click", onSendMessage);
+      el.querySelector("#msg-body").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSendMessage();
+      });
+      focusAutofocus(el);
+      const thr = el.querySelector(".thread"); thr.scrollTop = thr.scrollHeight;
+    }
+
+    function fmtDateTime(iso) {
+      const d = new Date(iso);
+      return isNaN(d) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+
+    // ── Handoffs view ────────────────────────────────────────────────────────
+    const CATEGORIES = ["health", "school", "mood", "items", "general"];
+    function renderHandoffs(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">Handoff notes are shared between the parents.</div>`; return; }
+      const list = handoffs.length ? handoffs.map(h => `
+        <div class="card">
+          <div class="spread">
+            <strong>${esc(memberName(h.child_id))}</strong>
+            <span class="muted">${esc(fmtRange(h.note_date, h.note_date))}</span>
+          </div>
+          <div class="row" style="margin:6px 0"><span class="note-cat">${esc(h.category)}</span></div>
+          <div>${esc(h.body)}</div>
+          <p class="muted" style="margin:8px 0 0">— ${esc(memberName(h.created_by))}</p>
+        </div>`).join("") : `<div class="empty">No handoff notes yet.</div>`;
+      el.innerHTML = `
+        <div class="spread" style="margin-bottom:12px">
+          <span class="muted">Notes for the next exchange — meds, school, mood, items to pack.</span>
+          ${childIds().length ? `<button class="btn btn-primary btn-sm" data-newnote>+ Add note</button>` : ""}
+        </div>
+        ${childIds().length ? list : `<div class="empty">Add a custody schedule in Setup first.</div>`}`;
+      el.querySelector("[data-newnote]")?.addEventListener("click", openHandoffModal);
+    }
+
+    // ── Setup view ───────────────────────────────────────────────────────────
+    function renderSetup(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">Only a parent can configure Co-Parenting.</div>`; return; }
+      const others = adults().filter(m => me && m.id !== me.id);
+      const pairStatus = !partnerId
+        ? `<p class="muted">Not paired yet. Choose your co-parent so you can share a private message log.</p>`
+        : partnerReciprocal
+          ? `<p>✅ Paired with <b>${esc(memberName(partnerId))}</b>.</p>`
+          : `<p>⏳ You chose <b>${esc(memberName(partnerId))}</b> — waiting for them to choose you back.</p>`;
+
+      const schedRows = schedules.length ? schedules.map(s => `
+        <div class="spread" style="padding:8px 0;border-top:1px solid var(--hub-border,#eee)">
+          <div>
+            <strong>${esc(memberName(s.child_id))}</strong>
+            <div class="muted">${esc(patternLabel(s))} · ${esc(memberName(s.parent_a_id))} / ${esc(memberName(s.parent_b_id))}</div>
+          </div>
+          <div class="row">
+            <button class="btn btn-sm" data-editsch="${esc(s.id)}">Edit</button>
+            <button class="btn btn-sm btn-danger" data-delsch="${esc(s.id)}">Delete</button>
+          </div>
+        </div>`).join("") : `<p class="muted">No schedules yet.</p>`;
+
+      el.innerHTML = `
+        <div class="card">
+          <h3>Co-parent</h3>
+          ${pairStatus}
+          <div class="radio-list" style="margin-top:8px">
+            ${others.length ? others.map(m => `
+              <label><input type="radio" name="partner" value="${esc(m.id)}" ${m.id === partnerId ? "checked" : ""}>
+              <span class="avatar" style="background:${memberColor(m.id, members)}">${esc(initial(m.name))}</span> ${esc(m.name)}</label>
+            `).join("") : `<p class="muted">No other adults in this household yet.</p>`}
+          </div>
+          ${others.length ? `<button class="btn btn-primary btn-sm" id="save-partner">Save co-parent</button>` : ""}
+        </div>
+        <div class="card">
+          <div class="spread"><h3 style="margin:0">Custody schedules</h3>
+            <button class="btn btn-primary btn-sm" data-newsch>+ Add child</button></div>
+          ${schedRows}
+        </div>`;
+
+      el.querySelector("#save-partner")?.addEventListener("click", onSavePartner);
+      el.querySelector("[data-newsch]")?.addEventListener("click", () => openScheduleModal(null));
+      el.querySelectorAll("[data-editsch]").forEach(b =>
+        b.addEventListener("click", () => openScheduleModal(schedules.find(s => s.id === b.dataset.editsch))));
+      el.querySelectorAll("[data-delsch]").forEach(b =>
+        b.addEventListener("click", () => onDeleteSchedule(b.dataset.delsch)));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Modals
+    // ══════════════════════════════════════════════════════════════════════════
+    let modalEl = null;
+    function openModal(html) {
+      closeModal();
+      modalEl = document.createElement("div");
+      modalEl.className = "modal-backdrop";
+      modalEl.innerHTML = `<div class="modal">${html}</div>`;
+      modalEl.addEventListener("click", e => { if (e.target === modalEl) closeModal(); });
+      document.body.appendChild(modalEl);
+      modalEl.querySelector("[data-close]")?.addEventListener("click", closeModal);
+      focusAutofocus(modalEl);
+    }
+    function closeModal() { modalEl?.remove(); modalEl = null; }
+    function focusAutofocus(root) {
+      const t = root.querySelector("[data-autofocus]");
+      if (t) setTimeout(() => t.focus(), 30);
+    }
+    function optionList(ids, selected) {
+      return ids.map(id => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(memberName(id))}</option>`).join("");
+    }
+
+    // Schedule create/edit
+    function openScheduleModal(existing) {
+      const kids = members.filter(m => !isAdult(m, members));
+      const adultIds = adults().map(a => a.id);
+      const e = existing || {};
+      openModal(`
+        <h3>${existing ? "Edit" : "Add"} custody schedule</h3>
+        <label class="field"><span>Child</span>
+          <select id="f-child" ${existing ? "disabled" : ""}>
+            ${kids.length ? kids.map(k => `<option value="${esc(k.id)}" ${k.id === e.child_id ? "selected" : ""}>${esc(k.name)}</option>`).join("")
+              : `<option value="">No children in household</option>`}
+          </select></label>
+        <div class="row" style="gap:10px">
+          <label class="field" style="flex:1"><span>Parent A</span><select id="f-pa">${optionList(adultIds, e.parent_a_id ?? me?.id)}</select></label>
+          <label class="field" style="flex:1"><span>Parent B</span><select id="f-pb">${optionList(adultIds, e.parent_b_id ?? partnerId ?? adultIds.find(id => id !== me?.id))}</select></label>
+        </div>
+        <label class="field"><span>Pattern</span>
+          <select id="f-pattern">
+            <option value="alternating_weeks" ${e.pattern === "alternating_weeks" ? "selected" : ""}>Alternating weeks (7/7)</option>
+            <option value="two_two_three" ${e.pattern === "two_two_three" ? "selected" : ""}>2-2-3 rotation</option>
+            <option value="custom" ${e.pattern === "custom" ? "selected" : ""}>Custom cycle</option>
+          </select></label>
+        <div id="f-custom-wrap" style="display:${e.pattern === "custom" ? "block" : "none"}">
+          <label class="field"><span>Cycle — a = Parent A day, b = Parent B day</span>
+            <input id="f-cycle" placeholder="a,a,b,b,a,a,a" value="${esc(normalizeCycle(e.cycle).join(","))}"></label>
+          <p class="hint">One letter per day; the sequence repeats.</p>
+        </div>
+        <label class="field"><span>Cycle start date (day 1 of the pattern)</span>
+          <input type="date" id="f-anchor" value="${esc(e.anchor_date ?? todayStr())}"></label>
+        <label class="field"><span>Exchange time (optional)</span>
+          <input type="time" id="f-time" value="${esc(e.exchange_time ?? "")}"></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-sch">${existing ? "Save" : "Create"}</button>
+        </div>`);
+      const patSel = modalEl.querySelector("#f-pattern");
+      patSel.addEventListener("change", () => {
+        modalEl.querySelector("#f-custom-wrap").style.display = patSel.value === "custom" ? "block" : "none";
+      });
+      modalEl.querySelector("#save-sch").addEventListener("click", () => onSaveSchedule(existing));
+    }
+
+    // Swap proposal
+    function openSwapModal(preChild) {
+      if (!partnerId) { hubAlert("Pair with your co-parent in Setup before proposing a swap."); return; }
+      const kids = childIds();
+      const parentIds = [...new Set(schedules.flatMap(s => [s.parent_a_id, s.parent_b_id]))];
+      openModal(`
+        <h3>Propose a swap</h3>
+        <p class="hint">The other parent must agree before it changes the calendar.</p>
+        <label class="field"><span>Child</span><select id="s-child">${kids.map(c => `<option value="${esc(c)}" ${c === preChild ? "selected" : ""}>${esc(memberName(c))}</option>`).join("")}</select></label>
+        <div class="row" style="gap:10px">
+          <label class="field" style="flex:1"><span>From</span><input type="date" id="s-start" data-autofocus value="${esc(addDays(todayStr(), 1))}"></label>
+          <label class="field" style="flex:1"><span>To</span><input type="date" id="s-end" value="${esc(addDays(todayStr(), 1))}"></label>
+        </div>
+        <label class="field"><span>Who should have them?</span><select id="s-parent">${optionList(parentIds, me?.id)}</select></label>
+        <label class="field"><span>Note (optional)</span><textarea id="s-note" maxlength="500" placeholder="Reason for the swap…"></textarea></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-swap">Send request</button>
+        </div>`);
+      modalEl.querySelector("#save-swap").addEventListener("click", onCreateSwap);
+    }
+
+    // Handoff note
+    function openHandoffModal() {
+      const kids = childIds();
+      openModal(`
+        <h3>Add handoff note</h3>
+        <label class="field"><span>Child</span><select id="h-child">${kids.map(c => `<option value="${esc(c)}">${esc(memberName(c))}</option>`).join("")}</select></label>
+        <div class="row" style="gap:10px">
+          <label class="field" style="flex:1"><span>Date</span><input type="date" id="h-date" value="${esc(todayStr())}"></label>
+          <label class="field" style="flex:1"><span>Category</span><select id="h-cat">${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join("")}</select></label>
+        </div>
+        <label class="field"><span>Note</span><textarea id="h-body" data-autofocus maxlength="2000" placeholder="e.g. Needs library books returned Monday."></textarea></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-note">Add note</button>
+        </div>`);
+      modalEl.querySelector("#save-note").addEventListener("click", onSaveHandoff);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Actions
+    // ══════════════════════════════════════════════════════════════════════════
+    async function onSavePartner() {
+      const chosen = document.querySelector('input[name="partner"]:checked')?.value;
+      if (!chosen) { hubAlert("Choose a co-parent first."); return; }
+      const btn = document.getElementById("save-partner");
+      if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+      try {
+        if (!DEMO) {
+          const res = await fetch(`/run/${APP_ID}/api/partner`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ partner_id: chosen }),
+          });
+          if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not save");
+          await loadPartner();
+        } else { partnerId = chosen; partnerReciprocal = true; }
+        render();
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = "Save co-parent"; }
+        hubAlert(e.message);
+      }
+    }
+
+    async function onSaveSchedule(existing) {
+      const child_id = existing?.child_id ?? modalEl.querySelector("#f-child").value;
+      const parent_a_id = modalEl.querySelector("#f-pa").value;
+      const parent_b_id = modalEl.querySelector("#f-pb").value;
+      const pattern = modalEl.querySelector("#f-pattern").value;
+      const anchor_date = modalEl.querySelector("#f-anchor").value;
+      const exchange_time = modalEl.querySelector("#f-time").value || null;
+      const cycleArr = pattern === "custom"
+        ? normalizeCycle(modalEl.querySelector("#f-cycle").value.split(",").map(s => s.trim().toLowerCase())) : [];
+
+      if (!child_id) { hubAlert("Pick a child."); return; }
+      if (parent_a_id === parent_b_id) { hubAlert("The two parents must be different people."); return; }
+      if (!anchor_date) { hubAlert("Pick a cycle start date."); return; }
+      if (pattern === "custom" && !cycleArr.length) { hubAlert("Enter a custom cycle like a,a,b,b."); return; }
+
+      const btn = modalEl.querySelector("#save-sch");
+      btn.disabled = true; btn.textContent = "Saving…";
+      const now = new Date().toISOString();
+      const cycle = pattern === "custom" ? JSON.stringify(cycleArr) : null;
+      const cycle_length = pattern === "custom" ? cycleArr.length : null;
+      try {
+        if (existing) {
+          if (!DEMO) await db(`UPDATE ${P}schedules SET pattern=?, cycle=?, cycle_length=?, anchor_date=?, parent_a_id=?, parent_b_id=?, exchange_time=?, updated_at=? WHERE id=?`,
+            [pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, now, existing.id]);
+          const i = schedules.findIndex(s => s.id === existing.id);
+          if (i !== -1) schedules[i] = { ...schedules[i], pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, updated_at: now };
+        } else {
+          const id = crypto.randomUUID();
+          if (!DEMO) await db(`INSERT INTO ${P}schedules (id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status, created_by, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
+            [id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, me?.id ?? null, now, now]);
+          schedules.push({ id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status: "active", created_by: me?.id, created_at: now, updated_at: now });
+        }
+        closeModal();
+        currentChildId = child_id;
+        render();
+        publishCalendar();
+      } catch (e) {
+        btn.disabled = false; btn.textContent = existing ? "Save" : "Create";
+        hubAlert(e.message);
+      }
+    }
+
+    async function onDeleteSchedule(id) {
+      const s = schedules.find(x => x.id === id);
+      if (!await hubConfirm({ message: `Delete ${memberName(s.child_id)}'s schedule?`, description: "Their custody days will be removed from the calendar.", destructive: true })) return;
+      try {
+        if (!DEMO) await db(`UPDATE ${P}schedules SET status='archived', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
+        schedules = schedules.filter(x => x.id !== id);
+        render();
+        publishCalendar();
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    async function onCreateSwap() {
+      const child_id = modalEl.querySelector("#s-child").value;
+      const start_date = modalEl.querySelector("#s-start").value;
+      const end_date = modalEl.querySelector("#s-end").value;
+      const to_parent_id = modalEl.querySelector("#s-parent").value;
+      const note = modalEl.querySelector("#s-note").value.trim() || null;
+      const responder_id = partnerId;
+      const v = validateSwap({ requester_id: me?.id, responder_id, child_id, start_date, end_date, to_parent_id }, todayStr());
+      if (!v.ok) { hubAlert(v.error); return; }
+
+      const btn = modalEl.querySelector("#save-swap");
+      btn.disabled = true; btn.textContent = "Sending…";
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      try {
+        if (!DEMO) {
+          await db(`INSERT INTO ${P}swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`,
+            [id, me.id, responder_id, child_id, start_date, end_date, to_parent_id, note, now, now]);
+          await agree(id, true); // bootstraps the agreement row + sets the requester's flag
+        }
+        swaps.unshift({ id, requester_id: me?.id, responder_id, child_id, start_date, end_date, to_parent_id, note, status: "pending", created_at: now, updated_at: now, requester_agreed: 1, responder_agreed: 0, locked_at: null });
+        closeModal();
+        view = "swaps"; render();
+        notifyPartner("Swap request", `${me?.name} proposed a schedule swap for ${memberName(child_id)}.`, { view: "swaps" });
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Send request";
+        hubAlert(e.message);
+      }
+    }
+
+    async function onAgree(id) {
+      const s = swaps.find(x => x.id === id); if (!s) return;
+      try {
+        if (!DEMO) await agree(id, true);
+        s.responder_agreed = 1; s.status = "locked"; s.locked_at = new Date().toISOString();
+        await applySwapOverride(s);        // now locked → record the override
+        render();
+        publishCalendar();
+        notifyPartner("Swap confirmed", `${me?.name} agreed to the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    async function onDecline(id) {
+      const s = swaps.find(x => x.id === id); if (!s) return;
+      try {
+        if (!DEMO) await db(`UPDATE ${P}swap_requests SET status='declined', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
+        s.status = "declined";
+        render();
+        notifyPartner("Swap declined", `${me?.name} declined the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    async function onCancel(id) {
+      const s = swaps.find(x => x.id === id); if (!s) return;
+      if (!await hubConfirm({ message: "Cancel this swap request?" })) return;
+      try {
+        if (!DEMO) await db(`UPDATE ${P}swap_requests SET status='cancelled', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
+        s.status = "cancelled";
+        render();
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    // Idempotently record a locked swap as an override (keyed on swap_request_id).
+    async function applySwapOverride(s) {
+      if (!DEMO) {
+        const existing = await db(`SELECT id FROM ${P}overrides WHERE swap_request_id = ?`, [s.id]);
+        if (existing.rows.length) return;
+      } else if (overrides.some(o => o.swap_request_id === s.id)) return;
+
+      const id = crypto.randomUUID(); const now = new Date().toISOString();
+      const row = { id, child_id: s.child_id, start_date: s.start_date, end_date: s.end_date, parent_id: s.to_parent_id, reason: s.note || "Swap", swap_request_id: s.id, created_by: me?.id ?? null, created_at: now };
+      if (!DEMO) await db(`INSERT INTO ${P}overrides (id, child_id, start_date, end_date, parent_id, reason, swap_request_id, created_by, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`,
+        [row.id, row.child_id, row.start_date, row.end_date, row.parent_id, row.reason, row.swap_request_id, row.created_by, row.created_at]);
+      overrides.push(row);
+    }
+
+    async function onSendMessage() {
+      const ta = document.getElementById("msg-body");
+      const body = ta.value.trim();
+      if (!body) { ta.focus(); return; }
+      const btn = document.getElementById("msg-send");
+      btn.disabled = true; btn.textContent = "…";
+      const now = new Date().toISOString();
+      try {
+        let id = crypto.randomUUID();
+        if (!DEMO) {
+          const r = await appendRecord("messages", { recipient_id: partnerId, body });
+          id = r.id ?? id;
+        }
+        messages.push({ id, author_id: me?.id, recipient_id: partnerId, body, sent_at: now });
+        render();
+        notifyPartner("New message", `${me?.name}: ${body.slice(0, 80)}`, { view: "messages" });
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Send";
+        hubAlert(e.message);
+      }
+    }
+
+    async function onSaveHandoff() {
+      const child_id = modalEl.querySelector("#h-child").value;
+      const note_date = modalEl.querySelector("#h-date").value;
+      const category = modalEl.querySelector("#h-cat").value;
+      const body = modalEl.querySelector("#h-body").value.trim();
+      if (!body) { modalEl.querySelector("#h-body").focus(); return; }
+      if (!child_id || !note_date) { hubAlert("Pick a child and date."); return; }
+      const btn = modalEl.querySelector("#save-note");
+      btn.disabled = true; btn.textContent = "Saving…";
+      const now = new Date().toISOString();
+      try {
+        let id = crypto.randomUUID();
+        if (!DEMO) {
+          const r = await appendRecord("handoff_notes", { child_id, note_date, category, body });
+          id = r.id ?? id;
+        }
+        handoffs.unshift({ id, child_id, note_date, category, body, created_by: me?.id, created_at: now });
+        closeModal(); render();
+        notifyPartner("Handoff note", `${me?.name} added a ${category} note for ${memberName(child_id)}.`, { view: "handoffs" });
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Add note";
+        hubAlert(e.message);
+      }
+    }
+
+    // ── Deep link + init ───────────────────────────────────────────────────────
+    function handleDeepLink() {
+      const v = new URLSearchParams(window.location.search).get("view");
+      if (v && TABS.some(([id]) => id === v)) view = v;
+    }
+
+    (async () => {
+      await loadMembers();
+      await loadPartner();
+      await loadData();
+      handleDeepLink();
+      render();
+      publishCalendar();
+    })();
+  </script>
+</body>
+</html>
