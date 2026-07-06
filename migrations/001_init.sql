@@ -13,6 +13,14 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__partner_config (
 );
 
 -- One custody rotation per child. adult_writable: everyone reads, adults manage.
+-- PEER MODEL (intentional): there is no per-schedule "owner" — either co-parent
+-- (any adult) may create/edit/delete schedules and overrides directly. The
+-- countersigned-swap flow (swap_requests + swap_agreements) is a coordination
+-- courtesy with a tamper-evident record, NOT a hard gate on the calendar. A
+-- parent could bypass it and write an override directly; that is acceptable
+-- because co-parents are adults with equal authority over the schedule.
+-- Enforcing "no unilateral change" would require routing override creation
+-- through an endpoint keyed to a locked agreement (deliberately not done).
 --   pattern:      'alternating_weeks' | 'two_two_three' | 'custom'
 --   cycle:        JSON array of 'a'/'b' (one per day) — only used when pattern='custom'
 --   cycle_length: length of the custom cycle in days
@@ -54,6 +62,11 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__overrides (
 -- responder) may read or write the row. Item-detail table; the lock/consent
 -- state lives in swap_agreements so a party can't force a lock via direct SQL.
 --   status: 'pending' | 'declined' | 'cancelled'  ('locked' is derived from swap_agreements)
+-- No post-lock immutability (accepted): party_scoped keeps this row writable
+-- after the agreement locks, so a party could set status='cancelled' via direct
+-- SQL and mask a swap whose override already applied. Cosmetic only — the
+-- override is the source of truth, and both parties are adults. A frozen_when
+-- fix isn't clean here because 'locked' is derived, not stored on this row.
 CREATE TABLE IF NOT EXISTS app_co_parenting__swap_requests (
   id           TEXT NOT NULL PRIMARY KEY,
   requester_id TEXT NOT NULL,
@@ -95,6 +108,10 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__messages (
 
 -- Per-exchange handoff notes (meds, school, mood, items to send along).
 -- endpoint_only + append_only_records: adults read, appends stamp created_by/created_at.
+-- read:"adult" scopes to ALL household adults, not just the linked co-parent pair
+-- (accepted): the table has no recipient column, so a couple_scoped read would
+-- need a schema change and would gate notes behind pairing. Content is child
+-- logistics, and single-pair households are the common case.
 CREATE TABLE IF NOT EXISTS app_co_parenting__handoff_notes (
   id         TEXT NOT NULL PRIMARY KEY,
   child_id   TEXT NOT NULL,
