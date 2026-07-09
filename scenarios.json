@@ -1,0 +1,97 @@
+{
+  "scenarios": [
+    {
+      "name": "messages are visible only to the two linked co-parents; direct writes are endpoint-only",
+      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
+          "params": ["{{a}}", "{{b}}", "sess-ab", "2026-01-01T00:00:00Z"]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
+          "params": ["{{b}}", "{{a}}", "sess-ab", "2026-01-01T00:00:00Z"]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at) VALUES (?, ?, ?, ?, ?)",
+          "params": ["m1", "{{a}}", "{{b}}", "pickup at 5", "2026-01-01T00:00:00Z"]
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id, body FROM app_co_parenting__messages",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "m1" }] }
+        },
+        {
+          "action": "db",
+          "as": "outsider",
+          "sql": "SELECT id FROM app_co_parenting__messages",
+          "expect": { "status": 200, "rowCount": 0 }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__messages SET body = 'edited' WHERE id = ?",
+          "params": ["m1"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        }
+      ]
+    },
+    {
+      "name": "swap requests are visible only to the two parties",
+      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+          "params": ["sw1", "{{a}}", "{{b}}", "child-1", "2026-02-01", "2026-02-03", "{{b}}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id FROM app_co_parenting__swap_requests",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "sw1" }] }
+        },
+        {
+          "action": "db",
+          "as": "outsider",
+          "sql": "SELECT id FROM app_co_parenting__swap_requests",
+          "expect": { "status": 200, "rowCount": 0 }
+        }
+      ]
+    },
+    {
+      "name": "handoff notes are adult-read, endpoint-write; children cannot read them",
+      "members": { "adult": "adult", "kid": "child" },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "params": ["hn1", "child-1", "2026-02-01", "meds", "allergy meds at noon", "{{adult}}", "2026-01-01T00:00:00Z"]
+        },
+        {
+          "action": "db",
+          "as": "adult",
+          "sql": "SELECT id FROM app_co_parenting__handoff_notes",
+          "expect": { "status": 200, "rowCount": 1 }
+        },
+        {
+          "action": "db",
+          "as": "kid",
+          "sql": "SELECT id FROM app_co_parenting__handoff_notes",
+          "expect": { "status": 403, "errorIncludes": "adult" }
+        },
+        {
+          "action": "db",
+          "as": "adult",
+          "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "params": ["hn2", "child-1", "2026-02-02", "school", "direct write", "{{adult}}", "2026-01-01T00:00:00Z"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        }
+      ]
+    }
+  ]
+}
