@@ -123,6 +123,8 @@
     } from "/hub-sdk.js";
     import {
       effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
+      buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
+      notesForTransition,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -153,6 +155,7 @@
     let members = [], memberMap = new Map();
     let partnerId = null, partnerReciprocal = false;
     let schedules = [], overrides = [], swaps = [], messages = [], handoffs = [];
+    let custodyDays = [];                        // materialized rotation (agenda/glance source)
     let view = "schedule";
     let currentChildId = null;
     let calMonth = null;                         // { y, m } (m is 0-based)
@@ -272,6 +275,59 @@
       }).catch(() => {});
     }
 
+    // ── Materialized custody days (agenda / glance source) ───────────────────
+    // The hub runs the `agenda` and `glance` SELECTs itself and can't call the
+    // rotation engine, so the resolved days are written into custody_days.
+    // Regenerated wholesale — the rows are derived state with no independent
+    // truth, and a partial rebuild would leave stale days behind an edit.
+    const CUSTODY_HORIZON_DAYS = 120;
+
+    /**
+     * Recompute the projection into local state. Runs for everyone (children
+     * included) so the in-app "next handoff" line is correct even for members
+     * who can't write the table — only the persist step below is adult-gated.
+     */
+    function computeCustodyDays() {
+      const start = todayStr();
+      custodyDays = buildCustodyDays(schedules, overrides, {
+        startDate: start, endDate: addDays(start, CUSTODY_HORIZON_DAYS),
+        childName: memberName, parentName: memberName,
+      });
+      return custodyDays;
+    }
+
+    async function publishCustodyDays() {
+      const rows = computeCustodyDays();
+      if (!DB) return;
+      if (!canManage()) return;              // adult_writable — a child would 403
+      const start = todayStr();
+
+      const now = new Date().toISOString();
+      try {
+        // Past days are left alone: retain_days prunes them, and keeping them
+        // means a mid-rotation glance still has yesterday's context.
+        await db(`DELETE FROM ${P}custody_days WHERE day >= ?`, [start]);
+        const COLS = "(id, child_id, day, parent_id, from_parent_id, is_transition, exchange_time, source, title, subtitle, updated_at)";
+        for (let i = 0; i < rows.length; i += 40) {
+          const chunk = rows.slice(i, i + 40);
+          const placeholders = chunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?)").join(",");
+          const params = chunk.flatMap(r => [
+            r.id, r.child_id, r.day, r.parent_id, r.from_parent_id,
+            r.is_transition, r.exchange_time, r.source, r.title, r.subtitle, now,
+          ]);
+          await db(`INSERT INTO ${P}custody_days ${COLS} VALUES ${placeholders}`, params);
+        }
+      } catch {
+        // Non-fatal: Today/glance go stale until the next edit, but the app,
+        // the calendar export, and the schedule view are all unaffected.
+      }
+    }
+
+    /** Rebuild both derived surfaces after any schedule/override change. */
+    async function republishDerived() {
+      await Promise.all([publishCalendar(), publishCustodyDays()]);
+    }
+
     // ── Endpoints ────────────────────────────────────────────────────────────
     async function appendRecord(name, data) {
       const res = await fetch(`${APPEND_RECORD}/${encodeURIComponent(name)}`, {
@@ -308,6 +364,9 @@
     ];
 
     function render() {
+      computeCustodyDays();   // cheap (horizon × children) and keeps the status
+                              // card in step with edits that render before the
+                              // async persist in republishDerived() lands
       const tabsEl = document.getElementById("tabs");
       tabsEl.innerHTML = TABS.map(([id, label]) =>
         `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${esc(label)}</button>`
@@ -340,8 +399,30 @@
       const colB = memberColor(sch.parent_b_id, members);
       const monthName = new Date(calMonth.y, calMonth.m, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
 
+      // "Where are the kids now, and when does that change" — the same two facts
+      // the hub's Today row and glance tile show, from the same projection.
+      const todayRow = custodyDays.find(r => r.child_id === currentChildId && r.day === todayStr());
+      const upcoming = nextTransition(custodyDays, addDays(todayStr(), 1), currentChildId);
+      const statusHtml = todayRow ? `
+        <div class="card">
+          <div class="spread">
+            <div>
+              <strong>${esc(todayRow.title)}</strong>
+              <div class="muted">${esc(todayRow.subtitle ?? "")}</div>
+            </div>
+            ${upcoming ? `<div class="muted" style="text-align:right">Next handoff<br><strong>${esc(fmtHandoffDay(upcoming.day))}</strong></div>` : ""}
+          </div>
+          ${upcoming && canManage() ? `
+            <div class="row" style="margin-top:10px;gap:8px">
+              <button class="btn btn-sm" data-noteupcoming="${esc(upcoming.child_id)}|${esc(upcoming.day)}">+ Note for this handoff</button>
+              ${(() => { const n = notesForTransition(handoffs, upcoming.child_id, upcoming.day).length;
+                         return n ? `<span class="muted">${n} note${n === 1 ? "" : "s"} ready</span>` : ""; })()}
+            </div>` : ""}
+        </div>` : "";
+
       el.innerHTML = `
         <div class="pills">${pills}</div>
+        ${statusHtml}
         <div class="card">
           <div class="cal-head">
             <button class="btn btn-sm" data-nav="-1">‹</button>
@@ -363,6 +444,11 @@
 
       el.querySelectorAll("[data-child]").forEach(b =>
         b.addEventListener("click", () => { currentChildId = b.dataset.child; render(); }));
+      el.querySelectorAll("[data-noteupcoming]").forEach(b =>
+        b.addEventListener("click", () => {
+          const [child_id, day] = b.dataset.noteupcoming.split("|");
+          openHandoffModal({ child_id, day });
+        }));
       el.querySelectorAll("[data-nav]").forEach(b =>
         b.addEventListener("click", () => {
           let m = calMonth.m + parseInt(b.dataset.nav, 10), y = calMonth.y;
@@ -444,6 +530,15 @@
       </div>`;
     }
 
+    /** "Fri" this week, else "Fri, Aug 8". Parsed at noon so no TZ day-shift. */
+    function fmtHandoffDay(day) {
+      const d = new Date(day + "T12:00:00");
+      const within7 = (d - new Date(todayStr() + "T12:00:00")) < 7 * 86400000;
+      return d.toLocaleDateString(undefined, within7
+        ? { weekday: "short" }
+        : { weekday: "short", month: "short", day: "numeric" });
+    }
+
     function fmtRange(a, b) {
       const f = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
       return a === b ? f(a) : `${f(a)} – ${f(b)}`;
@@ -490,23 +585,63 @@
     const CATEGORIES = ["health", "school", "mood", "items", "general"];
     function renderHandoffs(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">Handoff notes are shared between the parents.</div>`; return; }
-      const list = handoffs.length ? handoffs.map(h => `
+
+      // Notes are grouped under the exchange they were written for. The
+      // association is derived by date (see groupNotesByTransition) — notes
+      // that match no transition still appear, under "Other notes", because an
+      // append-only record must never become invisible.
+      const { groups, unanchored } = groupNotesByTransition(handoffs, custodyDays, todayStr());
+
+      const groupHtml = groups.map(g => `
         <div class="card">
-          <div class="spread">
-            <strong>${esc(memberName(h.child_id))}</strong>
-            <span class="muted">${esc(fmtRange(h.note_date, h.note_date))}</span>
+          <div class="spread" style="margin-bottom:8px">
+            <div>
+              <strong>${esc(g.transition.title)}</strong>
+              <div class="muted">${esc(fmtHandoffDay(g.transition.day))}${g.transition.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(g.transition))}` : ""}</div>
+            </div>
+            <span class="badge ${g.isUpcoming ? "b-pending" : "b-cancelled"}">${g.isUpcoming ? "Upcoming" : "Past"}</span>
           </div>
-          <div class="row" style="margin:6px 0"><span class="note-cat">${esc(h.category)}</span></div>
-          <div>${esc(h.body)}</div>
-          <p class="muted" style="margin:8px 0 0">— ${esc(memberName(h.created_by))}</p>
-        </div>`).join("") : `<div class="empty">No handoff notes yet.</div>`;
+          ${g.notes.map(noteRow).join("")}
+          ${g.isUpcoming ? `<div style="margin-top:10px"><button class="btn btn-sm" data-addfor="${esc(g.transition.child_id)}|${esc(g.transition.day)}">+ Add another note</button></div>` : ""}
+        </div>`).join("");
+
+      const otherHtml = unanchored.length ? `
+        <div class="card">
+          <div class="spread" style="margin-bottom:8px">
+            <strong>Other notes</strong>
+            <span class="muted">Not tied to an exchange</span>
+          </div>
+          ${unanchored.map(noteRow).join("")}
+        </div>` : "";
+
+      const body = (groups.length || unanchored.length)
+        ? groupHtml + otherHtml
+        : `<div class="empty">No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`;
+
       el.innerHTML = `
         <div class="spread" style="margin-bottom:12px">
-          <span class="muted">Notes for the next exchange — meds, school, mood, items to pack.</span>
+          <span class="muted">Notes for an exchange — meds, school, mood, items to pack.</span>
           ${childIds().length ? `<button class="btn btn-primary btn-sm" data-newnote>+ Add note</button>` : ""}
         </div>
-        ${childIds().length ? list : `<div class="empty">Add a custody schedule in Setup first.</div>`}`;
-      el.querySelector("[data-newnote]")?.addEventListener("click", openHandoffModal);
+        ${childIds().length ? body : `<div class="empty">Add a custody schedule in Setup first.</div>`}`;
+
+      el.querySelector("[data-newnote]")?.addEventListener("click", () => openHandoffModal());
+      el.querySelectorAll("[data-addfor]").forEach(b => b.addEventListener("click", () => {
+        const [child_id, day] = b.dataset.addfor.split("|");
+        openHandoffModal({ child_id, day });
+      }));
+    }
+
+    function noteRow(h) {
+      return `
+        <div style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
+          <div class="row" style="margin-bottom:4px">
+            <span class="note-cat">${esc(h.category)}</span>
+            <span class="muted">${esc(memberName(h.child_id))}</span>
+          </div>
+          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.body)}</div>
+          <p class="muted" style="margin:6px 0 0">— ${esc(memberName(h.created_by))}</p>
+        </div>`;
     }
 
     // ── Setup view ───────────────────────────────────────────────────────────
@@ -645,21 +780,73 @@
     }
 
     // Handoff note
-    function openHandoffModal() {
+    // `preset` — a custody_days transition row to pre-select (from "Add note for
+    // this handoff" on the schedule card).
+    function openHandoffModal(preset) {
       const kids = childIds();
+      const initialChild = preset?.child_id ?? kids[0];
+      const initialDate  = preset?.day ?? todayStr();
+
       openModal(`
         <h3>Add handoff note</h3>
-        <label class="field"><span>Child</span><select id="h-child">${kids.map(c => `<option value="${esc(c)}">${esc(memberName(c))}</option>`).join("")}</select></label>
+        <label class="field"><span>Child</span><select id="h-child">${kids.map(c =>
+          `<option value="${esc(c)}" ${c === initialChild ? "selected" : ""}>${esc(memberName(c))}</option>`).join("")}</select></label>
+        <label class="field"><span>For which handoff</span>
+          <select id="h-when"></select>
+        </label>
         <div class="row" style="gap:10px">
-          <label class="field" style="flex:1"><span>Date</span><input type="date" id="h-date" value="${esc(todayStr())}"></label>
+          <label class="field" style="flex:1"><span>Date</span><input type="date" id="h-date" value="${esc(initialDate)}"></label>
           <label class="field" style="flex:1"><span>Category</span><select id="h-cat">${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join("")}</select></label>
         </div>
+        <p class="hint" id="h-hint"></p>
         <label class="field"><span>Note</span><textarea id="h-body" data-autofocus maxlength="2000" placeholder="e.g. Needs library books returned Monday."></textarea></label>
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
           <button class="btn btn-primary" id="save-note">Add note</button>
         </div>`);
+
+      // The picker and the date field are two views of one value. The picker is
+      // the discoverable path (it knows when the next exchange actually is);
+      // the date field stays because a note for an ordinary day is still valid.
+      const whenEl = modalEl.querySelector("#h-when");
+      const dateEl = modalEl.querySelector("#h-date");
+      const childEl = modalEl.querySelector("#h-child");
+
+      function refreshWhen() {
+        const childId = childEl.value;
+        const options = upcomingTransitions(custodyDays, todayStr(), { childId });
+        whenEl.innerHTML = options.map(t =>
+          `<option value="${esc(t.day)}">${esc(fmtHandoffDay(t.day))} · ${esc(t.title)}${t.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(t))}` : ""}</option>`
+        ).join("") + `<option value="">Another day…</option>`;
+        // Keep whatever date is already chosen if it's one of the options.
+        whenEl.value = options.some(t => t.day === dateEl.value) ? dateEl.value : "";
+        syncHint();
+      }
+      function syncHint() {
+        const hint = modalEl.querySelector("#h-hint");
+        const filed = notesForTransition(handoffs, childEl.value, dateEl.value).length;
+        hint.textContent = filed
+          ? `${filed} note${filed === 1 ? "" : "s"} already filed for that day.`
+          : "";
+      }
+
+      whenEl.addEventListener("change", () => {
+        if (whenEl.value) dateEl.value = whenEl.value;
+        syncHint();
+      });
+      dateEl.addEventListener("change", () => {
+        whenEl.value = [...whenEl.options].some(o => o.value === dateEl.value) ? dateEl.value : "";
+        syncHint();
+      });
+      childEl.addEventListener("change", refreshWhen);
+      refreshWhen();
+
       modalEl.querySelector("#save-note").addEventListener("click", onSaveHandoff);
+    }
+
+    /** "6:00 PM" for a custody_days row, from its stored 'HH:MM'. */
+    function fmtExchangeTimeLabel(t) {
+      return (t.subtitle ?? "").replace(/^Handoff /, "");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -722,7 +909,7 @@
         closeModal();
         currentChildId = child_id;
         render();
-        publishCalendar();
+        republishDerived();
       } catch (e) {
         btn.disabled = false; btn.textContent = existing ? "Save" : "Create";
         hubAlert(e.message);
@@ -736,7 +923,7 @@
         if (!DEMO) await db(`UPDATE ${P}schedules SET status='archived', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
         schedules = schedules.filter(x => x.id !== id);
         render();
-        publishCalendar();
+        republishDerived();
       } catch (e) { hubAlert(e.message); }
     }
 
@@ -778,7 +965,7 @@
         s.responder_agreed = 1; s.status = "locked"; s.locked_at = new Date().toISOString();
         await applySwapOverride(s);        // now locked → record the override
         render();
-        publishCalendar();
+        republishDerived();
         notifyPartner("Swap confirmed", `${me?.name} agreed to the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
       } catch (e) { hubAlert(e.message); }
     }
@@ -877,7 +1064,7 @@
       await loadData();
       handleDeepLink();
       render();
-      publishCalendar();
+      republishDerived();
     })();
   </script>
 </body>

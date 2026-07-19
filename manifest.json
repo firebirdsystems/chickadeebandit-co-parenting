@@ -1,21 +1,34 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shared custody coordination for split households — per-child schedules, countersigned schedule swaps, a tamper-evident message log, and handoff notes. Custody days flow to the household Calendar so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
-  "tags": ["co-parenting", "custody", "schedule", "family"],
+  "tags": [
+    "co-parenting",
+    "custody",
+    "schedule",
+    "family"
+  ],
   "data_access": {
-    "reads": ["family.members"],
+    "reads": [
+      "family.members"
+    ],
     "writes": []
   },
-  "exports": ["calendar_events"],
+  "exports": [
+    "calendar_events"
+  ],
   "permissions": {
     "default_audience": "adults",
     "requires_approval": false
   },
+  "contexts": [
+    "household",
+    "shared_space"
+  ],
   "storage": "db",
   "db_plaintext_columns": [
     "note_date",
@@ -25,7 +38,9 @@
     "pattern",
     "cycle",
     "cycle_length",
-    "exchange_time"
+    "exchange_time",
+    "day",
+    "is_transition"
   ],
   "partner_link": {
     "table": "partner_config",
@@ -41,12 +56,29 @@
       "adults_bypass": false,
       "endpoint_writes_only": true
     },
-    "schedules": { "kind": "adult_writable" },
-    "overrides": { "kind": "adult_writable" },
+    "schedules": {
+      "kind": "adult_writable",
+      "audit_writes": true
+    },
+    "overrides": {
+      "kind": "adult_writable",
+      "audit_writes": true
+    },
+    "custody_days": {
+      "kind": "adult_writable",
+      "retain_days": {
+        "default": 400,
+        "timestamp_column": "day"
+      }
+    },
     "swap_requests": {
       "kind": "party_scoped",
-      "member_columns": ["requester_id", "responder_id"],
-      "self_column": "requester_id"
+      "member_columns": [
+        "requester_id",
+        "responder_id"
+      ],
+      "self_column": "requester_id",
+      "audit_writes": true
     },
     "swap_agreements": {
       "kind": "endpoint_only",
@@ -55,7 +87,10 @@
     "messages": {
       "kind": "couple_scoped",
       "self_column": "author_id",
-      "participant_columns": ["author_id", "recipient_id"],
+      "participant_columns": [
+        "author_id",
+        "recipient_id"
+      ],
       "partner_table": "partner_config",
       "partner_member_column": "member_id",
       "partner_id_column": "partner_id",
@@ -70,27 +105,56 @@
   "append_only_records": {
     "messages": {
       "table": "messages",
-      "allowed_columns": ["recipient_id", "body"],
+      "allowed_columns": [
+        "recipient_id",
+        "body"
+      ],
       "writer_column": "author_id",
       "created_at_column": "sent_at",
-      "write_acl": { "require_role": "adult" },
-      "max_text_lengths": { "body": 5000, "recipient_id": 120 }
+      "write_acl": {
+        "require_role": "adult"
+      },
+      "max_text_lengths": {
+        "body": 5000,
+        "recipient_id": 120
+      }
     },
     "handoff_notes": {
       "table": "handoff_notes",
-      "allowed_columns": ["child_id", "note_date", "category", "body"],
+      "allowed_columns": [
+        "child_id",
+        "note_date",
+        "category",
+        "body"
+      ],
       "writer_column": "created_by",
       "created_at_column": "created_at",
-      "write_acl": { "require_role": "adult" },
-      "allowed_values": {
-        "category": ["health", "school", "mood", "items", "general"]
+      "write_acl": {
+        "require_role": "adult"
       },
-      "max_text_lengths": { "child_id": 120, "note_date": 20, "category": 20, "body": 2000 }
+      "allowed_values": {
+        "category": [
+          "health",
+          "school",
+          "mood",
+          "items",
+          "general"
+        ]
+      },
+      "max_text_lengths": {
+        "child_id": 120,
+        "note_date": 20,
+        "category": 20,
+        "body": 2000
+      }
     }
   },
   "agreements": {
     "swap_agreements": {
-      "participant_columns": ["requester_id", "responder_id"],
+      "participant_columns": [
+        "requester_id",
+        "responder_id"
+      ],
       "agreement_columns": {
         "requester_id": "requester_agreed",
         "responder_id": "responder_agreed"
@@ -101,16 +165,47 @@
       "locked_at_column": "locked_at",
       "updated_at_column": "updated_at",
       "init_from_table": "swap_requests",
-      "init_columns": ["requester_id", "responder_id"]
+      "init_columns": [
+        "requester_id",
+        "responder_id"
+      ]
     }
   },
   "store_acls": {
     "calendar_events": {
-      "write": { "require_role": "adult" }
+      "write": {
+        "require_role": "adult"
+      }
     }
   },
-  "nav": { "label": "Co-Parenting" },
-  "widget": { "label": "Co-Parenting", "size": "small" },
+  "agenda": {
+    "kind": "event",
+    "label": "Custody",
+    "source": {
+      "kind": "sql",
+      "query": "SELECT id AS id, title AS title, subtitle AS subtitle, day AS when_at, child_id AS member_id FROM app_co_parenting__custody_days WHERE day = :today ORDER BY is_transition DESC, id LIMIT 10"
+    }
+  },
+  "glance": {
+    "source": {
+      "kind": "sql",
+      "query": "SELECT title AS title, subtitle AS subtitle, day AS at, child_id AS member_id FROM app_co_parenting__custody_days WHERE is_transition = 1 AND day >= :today ORDER BY day LIMIT 3"
+    },
+    "display": {
+      "template": "list",
+      "title": "title",
+      "subtitle": "subtitle",
+      "when": "at",
+      "owner": "member_id"
+    }
+  },
+  "nav": {
+    "label": "Co-Parenting"
+  },
+  "widget": {
+    "label": "Co-Parenting",
+    "size": "small"
+  },
   "icon": "🧭",
   "resource_limits": {
     "max_db_bytes": 52428800
