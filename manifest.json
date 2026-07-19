@@ -1,7 +1,7 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shared custody coordination for split households — per-child schedules, countersigned schedule swaps, a tamper-evident message log, and handoff notes. Custody days flow to the household Calendar so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
@@ -198,6 +198,97 @@
       "when": "at",
       "owner": "member_id"
     }
+  },
+  "reports": {
+    "change_history": true,
+    "views": [
+      {
+        "id": "custody_record",
+        "title": "Custody record",
+        "description": "Which parent each child was with, day by day, including exchanges.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT day AS day, child_id AS child, parent_id AS parent, from_parent_id AS from_parent, source AS source, exchange_time AS exchange_time FROM app_co_parenting__custody_days WHERE day >= :range_start AND day <= :range_end ORDER BY day, child_id"
+        },
+        "columns": [
+          { "key": "day", "label": "Date", "format": "date" },
+          { "key": "child", "label": "Child", "format": "member" },
+          { "key": "parent", "label": "With", "format": "member" },
+          { "key": "from_parent", "label": "Exchanged from", "format": "member" },
+          { "key": "exchange_time", "label": "Exchange time" },
+          { "key": "source", "label": "Set by" }
+        ]
+      },
+      {
+        "id": "message_log",
+        "title": "Message log",
+        "description": "Every message between the co-parents, oldest first. Append-only — messages cannot be edited or deleted.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT sent_at AS sent_at, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND sent_at <= :range_end ORDER BY sent_at"
+        },
+        "columns": [
+          { "key": "sent_at", "label": "Sent", "format": "datetime" },
+          { "key": "author", "label": "From", "format": "member" },
+          { "key": "recipient", "label": "To", "format": "member" },
+          { "key": "body", "label": "Message" }
+        ]
+      },
+      {
+        "id": "schedule_changes",
+        "title": "Schedule changes",
+        "description": "Every exception to the standing rotation — applied swaps and one-off adjustments.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT start_date AS start_date, end_date AS end_date, child_id AS child, parent_id AS parent, reason AS reason, created_by AS created_by, created_at AS created_at FROM app_co_parenting__overrides WHERE start_date >= :range_start AND start_date <= :range_end ORDER BY start_date"
+        },
+        "columns": [
+          { "key": "start_date", "label": "From", "format": "date" },
+          { "key": "end_date", "label": "To", "format": "date" },
+          { "key": "child", "label": "Child", "format": "member" },
+          { "key": "parent", "label": "With", "format": "member" },
+          { "key": "reason", "label": "Reason" },
+          { "key": "created_by", "label": "Entered by", "format": "member" },
+          { "key": "created_at", "label": "Entered", "format": "datetime" }
+        ]
+      },
+      {
+        "id": "swap_requests",
+        "title": "Swap requests",
+        "description": "Requested schedule changes and how each was answered.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT created_at AS created_at, child_id AS child, start_date AS start_date, end_date AS end_date, requester_id AS requester, responder_id AS responder, to_parent_id AS to_parent, status AS status, note AS note FROM app_co_parenting__swap_requests WHERE created_at >= :range_start AND created_at <= :range_end ORDER BY created_at"
+        },
+        "columns": [
+          { "key": "created_at", "label": "Requested", "format": "datetime" },
+          { "key": "child", "label": "Child", "format": "member" },
+          { "key": "start_date", "label": "From", "format": "date" },
+          { "key": "end_date", "label": "To", "format": "date" },
+          { "key": "requester", "label": "Requested by", "format": "member" },
+          { "key": "responder", "label": "Asked of", "format": "member" },
+          { "key": "to_parent", "label": "Proposed parent", "format": "member" },
+          { "key": "status", "label": "Outcome" },
+          { "key": "note", "label": "Note" }
+        ]
+      },
+      {
+        "id": "handoff_notes",
+        "title": "Handoff notes",
+        "description": "Notes passed at exchanges — health, school, mood, and items sent along.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT note_date AS note_date, child_id AS child, category AS category, body AS body, created_by AS created_by FROM app_co_parenting__handoff_notes WHERE note_date >= :range_start AND note_date <= :range_end ORDER BY note_date"
+        },
+        "columns": [
+          { "key": "note_date", "label": "Date", "format": "date" },
+          { "key": "child", "label": "Child", "format": "member" },
+          { "key": "category", "label": "Category" },
+          { "key": "body", "label": "Note" },
+          { "key": "created_by", "label": "Written by", "format": "member" }
+        ]
+      }
+    ]
   },
   "nav": {
     "label": "Co-Parenting"
