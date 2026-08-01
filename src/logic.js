@@ -377,3 +377,13 @@ export function validateSwap(swap, todayStr) {
   }
   return { ok: true };
 }
+
+/**
+ * Fields the in-app search matches against (see hub-sdk `searchMatch`).
+ * The message log is permanent and grows for years — it is a record
+ * both parents rely on, so finding an old message matters more here
+ * than in an ordinary chat.
+ */
+export function searchableFields(message, authorName = "") {
+  return [message.body, authorName];
+}

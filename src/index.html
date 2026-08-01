@@ -106,6 +106,13 @@
     .hint { font-size: 0.78rem; color: var(--hub-text-muted, #6b7280); margin-top: -4px; margin-bottom: 10px; }
     .note-cat { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 5px;
       background: var(--hub-bg, #eef0f3); color: var(--hub-text-muted, #4b5563); }
+    .search-row { margin-bottom: 12px; }
+    .search-input {
+      width: 100%; border: 1.5px solid var(--border-mid, var(--border, #d1d5db));
+      border-radius: 8px; padding: 9px 11px; font: inherit;
+      background: var(--surface, var(--card, #fff)); color: var(--text, inherit);
+    }
+    .search-input:focus { outline: none; border-color: var(--accent, #6366f1); }
   </style>
 </head>
 <body>
@@ -119,12 +126,12 @@
   <script type="module">
     import {
       memberColor, initial, esc, isAdult, hubConfirm, hubAlert,
-      sendHubNotification, hubAppUrl,
+      sendHubNotification, hubAppUrl, searchMatch,
     } from "/hub-sdk.js";
     import {
       effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
       buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
-      notesForTransition,
+      notesForTransition, searchableFields,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -155,6 +162,7 @@
     let members = [], memberMap = new Map();
     let partnerId = null, partnerReciprocal = false;
     let schedules = [], overrides = [], swaps = [], messages = [], handoffs = [];
+let searchQ = "";       // in-app search (see logic.js searchableFields)
     let custodyDays = [];                        // materialized rotation (agenda/glance source)
     let view = "schedule";
     let currentChildId = null;
@@ -553,21 +561,34 @@
         el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
         return;
       }
-      const thread = messages.length ? messages.map(m => {
+      const shown = searchQ
+        ? messages.filter(m => searchMatch(searchQ, searchableFields(m, memberName(m.author_id))))
+        : messages;
+      const thread = shown.length ? shown.map(m => {
         const mine = me && m.author_id === me.id;
         return `<div class="msg ${mine ? "mine" : "theirs"}">
           <div>${esc(m.body)}</div>
           <div class="meta">${esc(mine ? "You" : memberName(m.author_id))} · ${esc(fmtDateTime(m.sent_at))}</div>
         </div>`;
-      }).join("") : `<div class="empty">No messages yet. Say hello to ${esc(memberName(partnerId))}.</div>`;
+      }).join("") : (searchQ
+        ? `<div class="empty">No messages match "${esc(searchQ)}".</div>`
+        : `<div class="empty">No messages yet. Say hello to ${esc(memberName(partnerId))}.</div>`);
 
       el.innerHTML = `
         <p class="immutable-note">🔒 Messages are permanent — they can't be edited or deleted, so this stays a trustworthy record for both of you.</p>
+        ${messages.length ? `<div class="search-row"><input id="search" class="search-input" type="search" placeholder="Search messages…" aria-label="Search messages" value="${esc(searchQ)}" /></div>` : ""}
         <div class="thread">${thread}</div>
         <div class="compose">
           <textarea id="msg-body" data-autofocus placeholder="Message ${esc(memberName(partnerId))}…" maxlength="5000"></textarea>
           <button class="btn btn-primary" id="msg-send">Send</button>
         </div>`;
+      // Only this pane is redrawn, so put the caret back after typing.
+      el.querySelector("#search")?.addEventListener("input", (e) => {
+        searchQ = e.target.value;
+        renderMessages(el);
+        const box = el.querySelector("#search");
+        if (box) { box.focus(); box.setSelectionRange(searchQ.length, searchQ.length); }
+      });
       el.querySelector("#msg-send").addEventListener("click", onSendMessage);
       el.querySelector("#msg-body").addEventListener("keydown", (e) => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSendMessage();

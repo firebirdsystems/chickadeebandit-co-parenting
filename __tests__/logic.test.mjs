@@ -17,7 +17,7 @@ import {
   fmtExchangeTime,
   upcomingTransitions,
   groupNotesByTransition,
-  notesForTransition,
+  notesForTransition, searchableFields,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -494,5 +494,13 @@ describe("handoff notes ↔ custody transitions", () => {
       expect(notesForTransition(notes, "kid-1", "2026-02-02")).toEqual([]);
       expect(notesForTransition(undefined, "kid-1", "2026-01-19")).toEqual([]);
     });
+  });
+});
+
+describe("searchableFields", () => {
+  it("matches on the message body and its author", () => {
+    const fields = searchableFields({ body: "swapping the Tuesday pickup" }, "Sam");
+    expect(fields).toContain("swapping the Tuesday pickup");
+    expect(fields).toContain("Sam");
   });
 });
