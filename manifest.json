@@ -149,6 +149,113 @@
       }
     }
   },
+  "member_references": {
+    "partner_config": [
+      {
+        "column": "member_id",
+        "on_removed": "delete",
+        "id_column": "member_id"
+      },
+      {
+        "column": "partner_id",
+        "on_removed": "null"
+      }
+    ],
+    "schedules": [
+      {
+        "column": "created_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_a_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_b_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      }
+    ],
+    "overrides": [
+      {
+        "column": "created_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      }
+    ],
+    "swap_requests": [
+      {
+        "column": "requester_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "responder_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "to_parent_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      }
+    ],
+    "messages": [
+      {
+        "column": "author_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "recipient_id",
+        "on_removed": "keep"
+      }
+    ],
+    "handoff_notes": [
+      {
+        "column": "created_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      }
+    ],
+    "custody_days": [
+      {
+        "column": "parent_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "from_parent_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      }
+    ],
+    "swap_agreements": [
+      {
+        "column": "requester_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "responder_id",
+        "on_removed": "keep"
+      }
+    ]
+  },
   "agreements": {
     "swap_agreements": {
       "participant_columns": [
