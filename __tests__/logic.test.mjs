@@ -18,7 +18,7 @@ import {
   upcomingTransitions,
   groupNotesByTransition,
   notesForTransition, searchableFields, describeScheduleChange,
-  soleCoParentCandidate,
+  soleCoParentCandidate, lockedSwapOverrides,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -220,6 +220,47 @@ describe("overrides", () => {
     ];
     expect(effectiveForDate(s, overrides, "2026-01-06")).toMatchObject({ parent_id: PA, override_id: "new" });
     expect(effectiveForDate(s, overrides, "2026-01-08")).toMatchObject({ parent_id: PB, override_id: "old" });
+  });
+});
+
+describe("lockedSwapOverrides", () => {
+  const swap = (over = {}) => ({
+    id: "sw-1", child_id: "kid-1", start_date: "2026-01-05", end_date: "2026-01-06",
+    to_parent_id: PB, status: "locked", locked_at: "2026-01-02T00:00:00Z", ...over,
+  });
+
+  it("a locked swap is the only thing that moves a day off the rotation", () => {
+    const s = schedule();
+    const derived = lockedSwapOverrides([
+      swap(),
+      swap({ id: "sw-2", status: "pending", locked_at: null }),
+      swap({ id: "sw-3", status: "declined" }),
+      swap({ id: "sw-4", status: "cancelled" }),
+    ]);
+    expect(derived.map((o) => o.id)).toEqual(["sw-1"]);
+    expect(effectiveForDate(s, derived, "2026-01-05"))
+      .toMatchObject({ parent_id: PB, source: "override", override_id: "sw-1" });
+    expect(effectiveForDate(s, derived, "2026-01-07"))
+      .toMatchObject({ parent_id: PA, source: "schedule" });
+  });
+
+  it("a locked row with no snapshot terms produces nothing, not a wrong day", () => {
+    // A row tampered term-less (or locked before the snapshot existed) must
+    // fall back to the base rotation rather than invent an exception.
+    expect(lockedSwapOverrides([swap({ start_date: null })])).toEqual([]);
+    expect(lockedSwapOverrides([swap({ to_parent_id: null })])).toEqual([]);
+    expect(lockedSwapOverrides([swap({ child_id: null })])).toEqual([]);
+  });
+
+  it("of two locked swaps covering the same day, the later countersign wins", () => {
+    const s = schedule();
+    const derived = lockedSwapOverrides([
+      swap({ id: "first", end_date: "2026-01-10", locked_at: "2026-01-01T00:00:00Z" }),
+      swap({ id: "second", start_date: "2026-01-06", end_date: "2026-01-07",
+             to_parent_id: PA, locked_at: "2026-01-02T00:00:00Z" }),
+    ]);
+    expect(effectiveForDate(s, derived, "2026-01-06")).toMatchObject({ parent_id: PA, override_id: "second" });
+    expect(effectiveForDate(s, derived, "2026-01-08")).toMatchObject({ parent_id: PB, override_id: "first" });
   });
 });
 

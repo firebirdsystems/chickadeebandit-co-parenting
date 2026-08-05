@@ -13,14 +13,13 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__partner_config (
 );
 
 -- One custody rotation per child. adult_writable: everyone reads, adults manage.
--- PEER MODEL (intentional): there is no per-schedule "owner" — either co-parent
--- (any adult) may create/edit/delete schedules and overrides directly. The
--- countersigned-swap flow (swap_requests + swap_agreements) is a coordination
--- courtesy with a tamper-evident record, NOT a hard gate on the calendar. A
--- parent could bypass it and write an override directly; that is acceptable
--- because co-parents are adults with equal authority over the schedule.
--- Enforcing "no unilateral change" would require routing override creation
--- through an endpoint keyed to a locked agreement (deliberately not done).
+-- PEER MODEL for the STANDING rotation (intentional): there is no per-schedule
+-- "owner" — either co-parent (any adult) may create/edit the rotation directly,
+-- with audit_writes and a change notification keeping that honest. One-off
+-- EXCEPTIONS to the rotation are different: they exist only as countersigned
+-- swaps, whose terms the hub freezes into the endpoint_only swap_agreements
+-- row at lock (003_swap_snapshot.sql) — a locked swap IS a hard gate; neither
+-- parent can rewrite or unwind it afterwards.
 --   pattern:      'alternating_weeks' | 'two_two_three' | 'custom'
 --   cycle:        JSON array of 'a'/'b' (one per day) — only used when pattern='custom'
 --   cycle_length: length of the custom cycle in days
@@ -43,9 +42,11 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__schedules (
   updated_at    TEXT NOT NULL
 );
 
--- Date-range exceptions to the rotation: applied swaps and one-off adjustments.
--- adult_writable. When created from a locked swap, swap_request_id is set so the
--- write is idempotent (check-before-insert keyed on swap_request_id).
+-- DORMANT since 1.4.0 (003_swap_snapshot.sql): schedule exceptions now derive
+-- from the locked-swap snapshot in swap_agreements, and nothing reads or
+-- writes this table. Kept (migrations are additive-only) and reserved for a
+-- possible future direct-override feature — the soft, audited counterpart to
+-- the hard countersigned path.
 CREATE TABLE IF NOT EXISTS app_co_parenting__overrides (
   id              TEXT NOT NULL PRIMARY KEY,
   child_id        TEXT NOT NULL,
@@ -62,11 +63,11 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__overrides (
 -- responder) may read or write the row. Item-detail table; the lock/consent
 -- state lives in swap_agreements so a party can't force a lock via direct SQL.
 --   status: 'pending' | 'declined' | 'cancelled'  ('locked' is derived from swap_agreements)
--- No post-lock immutability (accepted): party_scoped keeps this row writable
--- after the agreement locks, so a party could set status='cancelled' via direct
--- SQL and mask a swap whose override already applied. Cosmetic only — the
--- override is the source of truth, and both parties are adults. A frozen_when
--- fix isn't clean here because 'locked' is derived, not stored on this row.
+-- This row stays writable after the lock (party_scoped), and that is now
+-- harmless: at lock the hub snapshots the terms into the endpoint_only
+-- swap_agreements row (003_swap_snapshot.sql), and both the schedule and the
+-- reports derive from that snapshot. A post-lock status='cancelled' or term
+-- edit here changes nothing anyone relies on — locked wins in the UI too.
 CREATE TABLE IF NOT EXISTS app_co_parenting__swap_requests (
   id           TEXT NOT NULL PRIMARY KEY,
   requester_id TEXT NOT NULL,

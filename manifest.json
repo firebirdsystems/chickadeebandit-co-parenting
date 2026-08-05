@@ -1,8 +1,8 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.3.0",
-  "description": "Shared custody coordination for split households — per-child schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle), countersigned schedule swaps, a tamper-evident message log, and handoff notes. Every schedule change notifies the other parent. Custody days flow to the household Calendar so kids always know where they are.",
+  "version": "1.4.0",
+  "description": "Shared custody coordination for split households — per-child schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle), countersigned schedule swaps whose terms are frozen server-side at approval, a tamper-evident message log, and handoff notes. Every schedule change notifies the other parent. Custody days flow to the household Calendar so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -253,6 +253,14 @@
       {
         "column": "responder_id",
         "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "to_parent_id",
+        "on_removed": "keep"
       }
     ]
   },
@@ -275,6 +283,13 @@
       "init_columns": [
         "requester_id",
         "responder_id"
+      ],
+      "snapshot_columns": [
+        "child_id",
+        "start_date",
+        "end_date",
+        "to_parent_id",
+        "note"
       ]
     }
   },
@@ -344,10 +359,10 @@
       {
         "id": "schedule_changes",
         "title": "Schedule changes",
-        "description": "Every exception to the standing rotation — applied swaps and one-off adjustments.",
+        "description": "Every countersigned exception to the standing rotation, with the terms exactly as frozen when both parents agreed.",
         "source": {
           "kind": "sql",
-          "query": "SELECT start_date AS start_date, end_date AS end_date, child_id AS child, parent_id AS parent, reason AS reason, created_by AS created_by, created_at AS created_at FROM app_co_parenting__overrides WHERE start_date >= :range_start AND start_date <= :range_end ORDER BY start_date"
+          "query": "SELECT start_date AS start_date, end_date AS end_date, child_id AS child, to_parent_id AS parent, note AS reason, requester_id AS requested_by, locked_at AS locked_at FROM app_co_parenting__swap_agreements WHERE status = 'locked' AND start_date >= :range_start AND start_date <= :range_end ORDER BY start_date"
         },
         "columns": [
           { "key": "start_date", "label": "From", "format": "date" },
@@ -355,8 +370,8 @@
           { "key": "child", "label": "Child", "format": "member" },
           { "key": "parent", "label": "With", "format": "member" },
           { "key": "reason", "label": "Reason" },
-          { "key": "created_by", "label": "Entered by", "format": "member" },
-          { "key": "created_at", "label": "Entered", "format": "datetime" }
+          { "key": "requested_by", "label": "Requested by", "format": "member" },
+          { "key": "locked_at", "label": "Countersigned", "format": "datetime" }
         ]
       },
       {

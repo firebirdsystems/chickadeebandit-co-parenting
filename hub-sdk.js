@@ -29,6 +29,87 @@ export function esc(str) {
     .replace(/'/g, "&#39;");
 }
 
+// ── Search matching ──────────────────────────────────────────────────────────────
+
+/** Max characters of query considered. Matching cost is O(tokens × fields ×
+ *  candidates × fieldLen); an unbounded query is a cheap CPU-amplification
+ *  vector, so both surfaces clamp before tokenizing. */
+export const MAX_QUERY_LENGTH = 200;
+/** Max whitespace-delimited tokens considered (further bounds the AND-fan-out). */
+export const MAX_QUERY_TOKENS = 24;
+
+/**
+ * normalizeText(s)
+ * Lowercase + strip diacritics for accent-insensitive matching.
+ * normalizeText("Crème Brûlée!") -> "creme brulee!"
+ * Non-string input is coerced; null/undefined -> "".
+ */
+export function normalizeText(s) {
+  if (s == null) return "";
+  return String(s)
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+}
+
+/**
+ * tokenizeQuery(query) -> string[]
+ * Normalizes, clamps to MAX_QUERY_LENGTH characters and MAX_QUERY_TOKENS
+ * tokens, and splits on whitespace. The single tokenizer both searchMatch and
+ * searchScore (and callers) share, so the CPU-amplification bounds can't drift.
+ */
+export function tokenizeQuery(query) {
+  return normalizeText(query)
+    .slice(0, MAX_QUERY_LENGTH)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, MAX_QUERY_TOKENS);
+}
+
+/**
+ * searchMatch(query, fields) -> boolean
+ * Tokenizes the query on whitespace; every token must substring-match at least
+ * one field (AND across tokens, OR across fields). Empty/whitespace query -> true.
+ * Matching is diacritic- and case-insensitive via normalizeText.
+ * @param {string} query
+ * @param {Array<string|null|undefined>} fields  null/undefined entries ignored
+ */
+export function searchMatch(query, fields) {
+  const tokens = tokenizeQuery(query);
+  if (tokens.length === 0) return true;
+  const haystack = (Array.isArray(fields) ? fields : [fields])
+    .filter((f) => f != null)
+    .map((f) => normalizeText(f));
+  return tokens.every((tok) => haystack.some((h) => h.includes(tok)));
+}
+
+/**
+ * searchScore(query, weightedFields) -> number
+ * weightedFields: [[text, weight], ...]. Returns 0 when searchMatch would be
+ * false (any token missing everywhere). Otherwise sums, per token, the highest
+ * field weight in which that token appears — so a hit in a high-weight field
+ * (e.g. title) outranks the same hit in a low-weight field (e.g. body).
+ * Empty query -> 0 (nothing to rank on).
+ */
+export function searchScore(query, weightedFields) {
+  const tokens = tokenizeQuery(query);
+  if (tokens.length === 0) return 0;
+  const fields = (Array.isArray(weightedFields) ? weightedFields : [])
+    .filter((wf) => Array.isArray(wf) && wf[0] != null)
+    .map(([text, weight]) => [normalizeText(text), Number(weight) || 0]);
+  let total = 0;
+  for (const tok of tokens) {
+    let best = 0;
+    let found = false;
+    for (const [text, weight] of fields) {
+      if (text.includes(tok)) { found = true; if (weight > best) best = weight; }
+    }
+    if (!found) return 0; // token missing everywhere -> non-match
+    total += best;
+  }
+  return total;
+}
+
 // ── Member role ────────────────────────────────────────────────────────────────
 export function isAdult(member) {
   return !!member && (member.role === "adult" || member.role === "admin");
@@ -112,8 +193,14 @@ export function createDbHelper(dbUrl) {
  * createEventsHelper(eventsUrl, sourceAppId)
  * Returns { publish, list } for the hub event log.
  * Use: const events = createEventsHelper(window.__EVENTS_URL, window.__APP_ID);
- *      await events.publish("allowance.weekly", { cents: 500 }, memberId);
- *      const past = await events.list({ type: "allowance.weekly", since: "2025-01-01T00:00:00Z" });
+ *      await events.publish("allowance.earned", { member_id: id, cents_earned: 500 }, memberId);
+ *      const past = await events.list({ type: "allowance.earned", since: "2025-01-01T00:00:00Z" });
+ *
+ * `type` must be a name from the event catalog (see ./hub-events.d.ts, served at
+ * /hub-events.d.ts) and the payload must satisfy that event's schema; the hub
+ * rejects unknown types and non-conforming payloads with HTTP 400. On rejection
+ * publish() returns null and logs the server's validation issues to the console.
+ * @param {import("./hub-events").EventTypeName} type
  */
 export function createEventsHelper(eventsUrl, sourceAppId) {
   return {
@@ -124,7 +211,12 @@ export function createEventsHelper(eventsUrl, sourceAppId) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source_app_id: sourceAppId, type, payload, subject_id: subjectId }),
       });
-      return res.ok ? res.json() : null;
+      if (res.ok) return res.json();
+      try {
+        const body = await res.json();
+        if (body && body.error) console.warn(`[hub] publish "${type}" rejected: ${body.error}`, body.issues ?? "");
+      } catch { /* non-JSON error body */ }
+      return null;
     },
     async list({ type, subjectId, since, limit } = {}) {
       if (!eventsUrl) return [];
@@ -215,6 +307,81 @@ export function createFilesHelper(filesUrl) {
     },
     url(fileId) {
       return filesUrl ? `${filesUrl}/${fileId}` : null;
+    },
+  };
+}
+
+// ── Share links helper factory ─────────────────────────────────────────────────
+/**
+ * createShareHelper(createUrl, revokeUrl, listUrl)
+ * Mint, list and revoke external share links for apps declaring `shareable`
+ * in their manifest. The hub renders the public read-only page at the
+ * returned url; the token is an anonymous bearer capability.
+ * Use: const share = createShareHelper(window.__SHARE_CREATE_URL, window.__SHARE_REVOKE_URL, window.__SHARE_LIST_URL);
+ *      if (share.enabled) { const { url } = await share.create("recipe", recipeId, { expiresInHours: 168 }); }
+ *      const links = await share.list();
+ *      await share.revoke(linkId);
+ * create/revoke throw Error with the server's message (e.g. sharing disabled
+ * for the household, or admins-only) so callers can surface it to the user.
+ *
+ * Premium (`sharing` capability) options on create — { password, writable,
+ * expiresInHours } beyond the free 30-day cap — reject with a 402 whose error
+ * body carries { missing_capabilities: ["sharing"], bundle: "premium" }. The
+ * thrown Error exposes `.missingCapability` and `.bundle` so callers can render
+ * an upsell / checkout link. `share.list()` also returns `{ entitled, bundle,
+ * limits, links }` via `share.status()` for rendering lock states up front.
+ */
+export function createShareHelper(createUrl, revokeUrl, listUrl) {
+  async function jsonOrThrow(res, fallback) {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(body?.error ?? fallback);
+      if (Array.isArray(body?.missing_capabilities) && body.missing_capabilities.includes("sharing")) {
+        err.missingCapability = true;
+        err.bundle = body.bundle ?? null;
+      }
+      throw err;
+    }
+    return body;
+  }
+  return {
+    /** False when the app's manifest lacks `shareable` (hub injected no URLs). */
+    enabled: !!createUrl,
+    async create(itemType, itemId, { expiresInHours, label, password, writable } = {}) {
+      if (!createUrl) throw new Error("Sharing is not enabled for this app");
+      const res = await fetch(createUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          item_type: itemType,
+          item_id: String(itemId),
+          expires_in_hours: expiresInHours,
+          label,
+          password,
+          writable,
+        }),
+      });
+      return jsonOrThrow(res, "Failed to create share link");
+    },
+    /** Full list response: { entitled, bundle, limits, links }. */
+    async status() {
+      if (!listUrl) return { enabled: false, entitled: false, bundle: null, limits: null, links: [] };
+      const res = await fetch(listUrl);
+      if (!res.ok) return { enabled: true, entitled: false, bundle: null, limits: null, links: [] };
+      const body = await res.json();
+      return { enabled: true, entitled: !!body.entitled, bundle: body.bundle ?? null, limits: body.limits ?? null, links: body.links ?? [] };
+    },
+    async list() {
+      return (await this.status()).links;
+    },
+    async revoke(id) {
+      if (!revokeUrl) throw new Error("Sharing is not enabled for this app");
+      const res = await fetch(revokeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      return jsonOrThrow(res, "Failed to revoke share link");
     },
   };
 }
@@ -315,12 +482,15 @@ export function normalizeHubUrl(url, appId = window.__APP_ID) {
 }
 
 /**
- * sendHubNotification({ title, body, audience?, url?, data? })
+ * sendHubNotification({ title, body, audience?, url?, data?, idempotencyKey? })
  * Send an app-scoped push notification through the hub. `audience` defaults to
  * "all"; pass a member id or member-id array for private/targeted items.
- * Returns the hub response JSON (`{ web, expo }`) or null on failure.
+ * Returns the hub response JSON (`{ web, expo }`), or null on failure — including
+ * a non-2xx status. A 503 means nothing was delivered and the idempotency claim
+ * was released, so re-sending with the same `idempotencyKey` will try again;
+ * this helper does not retry on its own.
  */
-export async function sendHubNotification({ title, body, audience = "all", url, data } = {}) {
+export async function sendHubNotification({ title, body, audience = "all", url, data, idempotencyKey } = {}) {
   if (!title || !body) throw new Error("sendHubNotification requires title and body");
   const payloadData = data && typeof data === "object" && !Array.isArray(data)
     ? { ...data }
@@ -331,15 +501,20 @@ export async function sendHubNotification({ title, body, audience = "all", url, 
   try {
     const res = await fetch(window.__NOTIFY_URL ?? "/api/notifications/send", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {}),
+      },
       body: JSON.stringify({
         title,
         body,
         audience,
         url: normalizeHubUrl(url),
         data: payloadData,
+        idempotency_key: idempotencyKey,
       }),
     });
+    if (!res.ok) return null;
     return await res.json().catch(() => null);
   } catch {
     return null;
@@ -384,20 +559,29 @@ export async function crossWrite(targetAppId, key, ops) {
  */
 export function createEventPoller(eventsUrl, eventType, callback, intervalMs = 30_000) {
   let since = new Date().toISOString();
+  let afterId = null;
+  let afterSequence = null;
   let timer = null;
+  let polling = false;
 
   async function poll() {
-    if (!eventsUrl) return;
+    if (!eventsUrl || polling) return;
+    polling = true;
     try {
       const p = new URLSearchParams({ type: eventType, since });
+      if (afterSequence !== null) p.set("after_sequence", String(afterSequence));
+      else if (afterId) p.set("after_id", afterId);
       const res = await fetch(`${eventsUrl}?${p}`);
       if (!res.ok) return;
       const events = await res.json();
       if (events.length > 0) {
         since = events[0].created_at; // events are desc, so first is newest
+        afterId = events[0].id;
+        afterSequence = Number.isSafeInteger(events[0].sequence) ? events[0].sequence : null;
         callback(events);
       }
     } catch { /* non-fatal */ }
+    finally { polling = false; }
   }
 
   poll(); // immediate first fetch

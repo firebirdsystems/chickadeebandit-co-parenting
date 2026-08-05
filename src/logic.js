@@ -108,6 +108,37 @@ export function normalizeCycle(cycle) {
 // ── Overrides ───────────────────────────────────────────────────────────────
 
 /**
+ * Override-shaped entries derived from LOCKED swaps — the only thing that can
+ * move a day off the base rotation.
+ *
+ * The schedule effect of a swap comes from the agreement row's term snapshot
+ * (frozen server-side at the moment of lock, in an endpoint_only table) —
+ * never from the still-writable swap_requests row, and never from a
+ * separately-written overrides row. That is what makes a locked swap binding
+ * on the calendar: nothing either parent can write after the lock changes
+ * what was agreed. Input is the merged swap shape (mergeSwap in index.html
+ * substitutes the snapshot terms once locked); rows locked before the
+ * snapshot existed, or tampered into a term-less state, produce nothing
+ * rather than a wrong day.
+ *
+ * `created_at: locked_at` feeds effectiveForDate's later-wins rule: of two
+ * locked swaps covering the same day, the later countersign prevails.
+ */
+export function lockedSwapOverrides(swaps) {
+  return (swaps || [])
+    .filter((s) => s.status === "locked"
+      && s.child_id && s.start_date && s.end_date && s.to_parent_id)
+    .map((s) => ({
+      id: s.id,
+      child_id: s.child_id,
+      start_date: s.start_date,
+      end_date: s.end_date,
+      parent_id: s.to_parent_id,
+      created_at: s.locked_at ?? "",
+    }));
+}
+
+/**
  * Effective parent id for a child on a date, applying overrides on top of the
  * base rotation. Later-created overrides win when ranges overlap. `overrides`
  * may include entries for other children; they're filtered by schedule.child_id.
