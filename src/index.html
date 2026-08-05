@@ -131,7 +131,8 @@
     import {
       effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
       buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
-      notesForTransition, searchableFields,
+      notesForTransition, searchableFields, describeScheduleChange,
+      soleCoParentCandidate,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -173,6 +174,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     function childIds() { return [...new Set(schedules.map(s => s.child_id))]; }
     function adults() { return members.filter(m => isAdult(m, members)); }
     const canManage = () => !!me && isAdult(me, members);   // mirrors adult_writable / write_acl:adult
+
+    /** The unambiguous co-parent, or null. Rule lives in logic.js (tested). */
+    const likelyCoParent = () => soleCoParentCandidate(adults(), me?.id);
 
     // ── Loading ──────────────────────────────────────────────────────────────
     async function loadMembers() {
@@ -489,13 +493,35 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     function patternLabel(sch) {
       if (sch.pattern === "alternating_weeks") return "Alternating weeks";
       if (sch.pattern === "two_two_three") return "2-2-3 rotation";
+      if (sch.pattern === "alternating_weekends") return "Alternating weekends";
       if (sch.pattern === "custom") return `Custom ${normalizeCycle(sch.cycle).length}-day cycle`;
       return sch.pattern;
+    }
+
+    // Every pattern is resolved as an offset from anchor_date, so the anchor is
+    // what aligns a rotation to the days of the week. The fixed-shape patterns
+    // therefore need the anchor on a specific weekday; say which, at the point
+    // the date is picked, rather than leaving it to be discovered afterwards.
+    function anchorHint(pattern) {
+      if (pattern === "alternating_weekends") {
+        return "Pick the Monday that opens a week in which Parent B has the weekend.";
+      }
+      if (pattern === "two_two_three") return "Pick the first day of Parent A's two-day block.";
+      if (pattern === "alternating_weeks") return "Pick the first day of one of Parent A's weeks.";
+      return "The first day of the cycle; the sequence repeats from here.";
     }
 
     // ── Swaps view ───────────────────────────────────────────────────────────
     function renderSwaps(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">Swaps are managed by the parents.</div>`; return; }
+      // Surfaced here rather than only as an alert from the New-swap button:
+      // a swap is a request TO someone, so with no co-parent recorded there is
+      // nobody to send it to.
+      if (!partnerId) {
+        el.innerHTML = pairingPrompt("A swap is a request to your co-parent, so we need to know who that is.");
+        wirePairingPrompt(el);
+        return;
+      }
       const list = schedules.length
         ? (swaps.length ? swaps.map(swapCard).join("") : `<div class="empty">No swap requests yet.</div>`)
         : `<div class="empty">Add a custody schedule in Setup before proposing swaps.</div>`;
@@ -552,13 +578,41 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       return a === b ? f(a) : `${f(a)} – ${f(b)}`;
     }
 
+    /**
+     * The blocked-on-pairing panel, shared by Messages and Swaps.
+     *
+     * Both used to send you to Setup to work out what was wrong. When the
+     * co-parent is unambiguous the whole thing collapses to one button here;
+     * otherwise it still explains itself rather than just refusing.
+     */
+    function pairingPrompt(why) {
+      const suggested = partnerId ? null : likelyCoParent();
+      if (suggested) {
+        return `<div class="empty">${esc(why)}
+          <br><br><button class="btn btn-primary" data-pair="${esc(suggested.id)}">Pair with ${esc(suggested.name)}</button></div>`;
+      }
+      if (partnerId && !partnerReciprocal) {
+        return `<div class="empty">Waiting for ${esc(memberName(partnerId))} to name you back — we've let them know.
+          <br><br>${esc(why)}</div>`;
+      }
+      return `<div class="empty">${esc(why)}
+        <br><br><button class="btn btn-primary" data-goto="setup">Choose your co-parent</button></div>`;
+    }
+
+    function wirePairingPrompt(el) {
+      el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
+      const pairBtn = el.querySelector("[data-pair]");
+      pairBtn?.addEventListener("click", () =>
+        pairWith(pairBtn.dataset.pair, pairBtn, pairBtn.textContent));
+    }
+
     // ── Messages view ────────────────────────────────────────────────────────
     function renderMessages(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">The message log is private to the two parents.</div>`; return; }
       if (!partnerId || !partnerReciprocal) {
-        el.innerHTML = `<div class="empty">Pair with your co-parent in <b>Setup</b> to start a message log.
-          <br><br><button class="btn btn-primary" data-goto="setup">Go to Setup</button></div>`;
-        el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
+        el.innerHTML = pairingPrompt(
+          "The message log is private to the two of you, so it opens once you've each named the other.");
+        wirePairingPrompt(el);
         return;
       }
       const shown = searchQ
@@ -669,11 +723,17 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     function renderSetup(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">Only a parent can configure Co-Parenting.</div>`; return; }
       const others = adults().filter(m => me && m.id !== me.id);
+      const suggested = partnerId ? null : likelyCoParent();
       const pairStatus = !partnerId
-        ? `<p class="muted">Not paired yet. Choose your co-parent so you can share a private message log.</p>`
+        ? (suggested
+            ? `<p class="muted">Confirm <b>${esc(suggested.name)}</b> as your co-parent to open your shared message log and enable swap requests.</p>`
+            : `<p class="muted">Not paired yet. Choose your co-parent so you can share a private message log.</p>`)
         : partnerReciprocal
           ? `<p>✅ Paired with <b>${esc(memberName(partnerId))}</b>.</p>`
-          : `<p>⏳ You chose <b>${esc(memberName(partnerId))}</b> — waiting for them to choose you back.</p>`;
+          : `<p>⏳ You chose <b>${esc(memberName(partnerId))}</b> — waiting for them to choose you back. We've let them know.</p>`;
+      // Pre-checked, never pre-saved: the radio still has to be confirmed, so
+      // the private message log is never opened without a deliberate act.
+      const checkedId = partnerId ?? suggested?.id ?? null;
 
       const schedRows = schedules.length ? schedules.map(s => `
         <div class="spread" style="padding:8px 0;border-top:1px solid var(--hub-border,#eee)">
@@ -693,11 +753,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           ${pairStatus}
           <div class="radio-list" style="margin-top:8px">
             ${others.length ? others.map(m => `
-              <label><input type="radio" name="partner" value="${esc(m.id)}" ${m.id === partnerId ? "checked" : ""}>
+              <label><input type="radio" name="partner" value="${esc(m.id)}" ${m.id === checkedId ? "checked" : ""}>
               <span class="avatar" style="background:${memberColor(m.id, members)}">${esc(initial(m.name))}</span> ${esc(m.name)}</label>
             `).join("") : `<p class="muted">No other adults in this household yet.</p>`}
           </div>
-          ${others.length ? `<button class="btn btn-primary btn-sm" id="save-partner">Save co-parent</button>` : ""}
+          ${others.length ? `<button class="btn btn-primary btn-sm" id="save-partner">${suggested ? `Confirm ${esc(suggested.name)}` : "Save co-parent"}</button>` : ""}
         </div>
         <div class="card">
           <div class="spread"><h3 style="margin:0">Custody schedules</h3>
@@ -756,6 +816,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           <select id="f-pattern">
             <option value="alternating_weeks" ${e.pattern === "alternating_weeks" ? "selected" : ""}>Alternating weeks (7/7)</option>
             <option value="two_two_three" ${e.pattern === "two_two_three" ? "selected" : ""}>2-2-3 rotation</option>
+            <option value="alternating_weekends" ${e.pattern === "alternating_weekends" ? "selected" : ""}>Alternating weekends (Fri–Sun)</option>
             <option value="custom" ${e.pattern === "custom" ? "selected" : ""}>Custom cycle</option>
           </select></label>
         <div id="f-custom-wrap" style="display:${e.pattern === "custom" ? "block" : "none"}">
@@ -765,6 +826,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         </div>
         <label class="field"><span>Cycle start date (day 1 of the pattern)</span>
           <input type="date" id="f-anchor" value="${esc(e.anchor_date ?? todayStr())}"></label>
+        <p class="hint" id="f-anchor-hint">${esc(anchorHint(e.pattern ?? "alternating_weeks"))}</p>
         <label class="field"><span>Exchange time (optional)</span>
           <input type="time" id="f-time" value="${esc(e.exchange_time ?? "")}"></label>
         <div class="modal-actions">
@@ -774,6 +836,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const patSel = modalEl.querySelector("#f-pattern");
       patSel.addEventListener("change", () => {
         modalEl.querySelector("#f-custom-wrap").style.display = patSel.value === "custom" ? "block" : "none";
+        modalEl.querySelector("#f-anchor-hint").textContent = anchorHint(patSel.value);
       });
       modalEl.querySelector("#save-sch").addEventListener("click", () => onSaveSchedule(existing));
     }
@@ -876,7 +939,19 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     async function onSavePartner() {
       const chosen = document.querySelector('input[name="partner"]:checked')?.value;
       if (!chosen) { hubAlert("Choose a co-parent first."); return; }
-      const btn = document.getElementById("save-partner");
+      await pairWith(chosen, document.getElementById("save-partner"), "Save co-parent");
+    }
+
+    /**
+     * Record `chosen` as this member's co-parent.
+     *
+     * Pairing is one row per member — mine names them, theirs names me — and
+     * `couple_scoped` only opens the message log once BOTH exist. So the second
+     * parent has to act too, and until they do the first parent is left staring
+     * at a tab that simply refuses to work. Nudging them is what turns pairing
+     * from a step you have to discover into one that completes itself.
+     */
+    async function pairWith(chosen, btn, restoreLabel) {
       if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
       try {
         if (!DEMO) {
@@ -887,9 +962,20 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not save");
           await loadPartner();
         } else { partnerId = chosen; partnerReciprocal = true; }
+        // Notified directly rather than via notifyPartner, which targets the
+        // *paired* partner — and from this side the pairing may not be mutual
+        // yet, which is precisely what they are being asked to fix.
+        if (!partnerReciprocal && !DEMO) {
+          sendHubNotification({
+            title: "Confirm your co-parent",
+            body: `${me?.name} named you as their co-parent. Confirm to open your shared message log.`,
+            audience: [chosen],
+            url: hubAppUrl(APP_ID, { view: "setup" }),
+          }).catch(() => {});
+        }
         render();
       } catch (e) {
-        if (btn) { btn.disabled = false; btn.textContent = "Save co-parent"; }
+        if (btn) { btn.disabled = false; btn.textContent = restoreLabel; }
         hubAlert(e.message);
       }
     }
@@ -916,16 +1002,30 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const cycle_length = pattern === "custom" ? cycleArr.length : null;
       try {
         if (existing) {
+          // Worked out BEFORE the write, against the row as it was loaded.
+          const changed = describeScheduleChange(existing, {
+            pattern, cycle, anchor_date, parent_a_id, parent_b_id, exchange_time,
+          });
           if (!DEMO) await db(`UPDATE ${P}schedules SET pattern=?, cycle=?, cycle_length=?, anchor_date=?, parent_a_id=?, parent_b_id=?, exchange_time=?, updated_at=? WHERE id=?`,
             [pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, now, existing.id]);
           const i = schedules.findIndex(s => s.id === existing.id);
           if (i !== -1) schedules[i] = { ...schedules[i], pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, updated_at: now };
+          // Either parent may rewrite the rotation unilaterally; the other one
+          // finding out is what keeps that honest. Silent on a no-op save.
+          if (changed) {
+            notifyPartner("Schedule changed",
+              `${me?.name} changed ${changed} on ${memberName(child_id)}'s schedule.`,
+              { view: "schedule" });
+          }
         } else {
           const id = crypto.randomUUID();
           if (!DEMO) await db(`INSERT INTO ${P}schedules (id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status, created_by, created_at, updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
             [id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, me?.id ?? null, now, now]);
           schedules.push({ id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status: "active", created_by: me?.id, created_at: now, updated_at: now });
+          notifyPartner("Schedule created",
+            `${me?.name} set up a custody schedule for ${memberName(child_id)}.`,
+            { view: "schedule" });
         }
         closeModal();
         currentChildId = child_id;
@@ -945,6 +1045,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         schedules = schedules.filter(x => x.id !== id);
         render();
         republishDerived();
+        notifyPartner("Schedule removed",
+          `${me?.name} removed ${memberName(s.child_id)}'s custody schedule.`,
+          { view: "schedule" });
       } catch (e) { hubAlert(e.message); }
     }
 

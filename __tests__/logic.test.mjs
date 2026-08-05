@@ -17,7 +17,8 @@ import {
   fmtExchangeTime,
   upcomingTransitions,
   groupNotesByTransition,
-  notesForTransition, searchableFields,
+  notesForTransition, searchableFields, describeScheduleChange,
+  soleCoParentCandidate,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -115,6 +116,57 @@ describe("two_two_three", () => {
   it("wraps cleanly at day 14", () => {
     expect(custodyKeyForDate(s, addDays(s.anchor_date, 14))).toBe("a");
     expect(custodyKeyForDate(s, addDays(s.anchor_date, 15))).toBe("a");
+  });
+});
+
+describe("alternating_weekends", () => {
+  const s = schedule({ pattern: "alternating_weekends" });
+  const keys = Array.from({ length: 14 }, (_, d) =>
+    custodyKeyForDate(s, addDays(s.anchor_date, d))
+  );
+
+  it("gives parent B Friday through Sunday of the first week only", () => {
+    expect(keys).toEqual([
+      "a", "a", "a", "a", "b", "b", "b",
+      "a", "a", "a", "a", "a", "a", "a",
+    ]);
+  });
+
+  it("lands parent B's block on an actual Fri/Sat/Sun", () => {
+    // The anchor is a Monday, so the pattern's weekday alignment is real and
+    // not just an index coincidence — this is the assumption anchorHint states.
+    for (const d of [4, 5, 6]) {
+      const date = new Date(`${addDays(s.anchor_date, d)}T00:00:00Z`);
+      expect([5, 6, 0]).toContain(date.getUTCDay());
+      expect(custodyKeyForDate(s, addDays(s.anchor_date, d))).toBe("b");
+    }
+  });
+
+  it("skips the intervening weekend, so B gets every OTHER weekend", () => {
+    for (const d of [11, 12, 13]) {
+      expect(custodyKeyForDate(s, addDays(s.anchor_date, d))).toBe("a");
+    }
+    // ...and B's next weekend is exactly 14 days after the first.
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, 18))).toBe("b");
+  });
+
+  it("wraps cleanly at day 14 and resolves before the anchor", () => {
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, 14))).toBe("a");
+    // The week immediately before the anchor is the off week, so the Friday
+    // three days back is still A's; B's previous weekend is a week earlier.
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, -3))).toBe("a");
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, -10))).toBe("b"); // prior Fri
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, -7))).toBe("a");
+  });
+
+  it("produces two transitions per fortnight in the materialized days", () => {
+    const rows = buildCustodyDays([s], [], {
+      startDate: s.anchor_date,
+      endDate: addDays(s.anchor_date, 13),
+    });
+    const transitions = rows.filter((r) => r.is_transition).map((r) => r.day);
+    // Handoff to B on the Friday, back to A on the Monday.
+    expect(transitions).toEqual([addDays(s.anchor_date, 4), addDays(s.anchor_date, 7)]);
   });
 });
 
@@ -238,6 +290,81 @@ describe("buildCalendarEvents", () => {
     });
     expect(events.some((e) => e.title.startsWith("Max"))).toBe(true);
     expect(events.some((e) => e.title.startsWith("Sam"))).toBe(true);
+  });
+});
+
+describe("soleCoParentCandidate", () => {
+  const adult = (id, over = {}) => ({ id, name: id, role: "adult", hasLogin: true, ...over });
+
+  it("picks the only other adult", () => {
+    expect(soleCoParentCandidate([adult("me"), adult("them")], "me")?.id).toBe("them");
+  });
+
+  it("declines to guess once a third adult is present", () => {
+    // A new spouse in the space. Picking wrong here would open the private
+    // message log to the wrong person, so the user chooses explicitly.
+    const roster = [adult("me"), adult("other-parent"), adult("stepparent")];
+    expect(soleCoParentCandidate(roster, "me")).toBeNull();
+  });
+
+  it("ignores adults who have no login and so could never pair back", () => {
+    const roster = [adult("me"), adult("them"), adult("placeholder", { hasLogin: false })];
+    expect(soleCoParentCandidate(roster, "me")?.id).toBe("them");
+  });
+
+  it("treats a missing hasLogin as present, since the field is optional", () => {
+    const roster = [adult("me"), { id: "them", name: "Them", role: "adult" }];
+    expect(soleCoParentCandidate(roster, "me")?.id).toBe("them");
+  });
+
+  it("returns null when there is nobody else, or no caller", () => {
+    expect(soleCoParentCandidate([adult("me")], "me")).toBeNull();
+    expect(soleCoParentCandidate([adult("me"), adult("them")], undefined)).toBeNull();
+    expect(soleCoParentCandidate(undefined, "me")).toBeNull();
+  });
+});
+
+describe("describeScheduleChange", () => {
+  const before = schedule();
+
+  it("returns null when nothing changed, so a no-op save stays silent", () => {
+    expect(describeScheduleChange(before, { ...before })).toBeNull();
+  });
+
+  it("returns null for a brand-new schedule (no prior version)", () => {
+    expect(describeScheduleChange(null, { ...before })).toBeNull();
+  });
+
+  it("names a single changed field", () => {
+    expect(describeScheduleChange(before, { ...before, anchor_date: "2026-01-12" }))
+      .toBe("the cycle start date");
+  });
+
+  it("joins several changes the way a person would", () => {
+    expect(describeScheduleChange(before, {
+      ...before, pattern: "two_two_three", anchor_date: "2026-01-12", exchange_time: "17:00",
+    })).toBe("the rotation pattern, the cycle start date and the exchange time");
+  });
+
+  it("treats swapping the two parents as a change", () => {
+    expect(describeScheduleChange(before, { ...before, parent_a_id: PB, parent_b_id: PA }))
+      .toBe("which parent is Parent A and which parent is Parent B");
+  });
+
+  it("does not double-report a custom cycle via cycle_length", () => {
+    // cycle_length is derived from cycle; listing both would say the same thing
+    // twice on every custom-cycle edit.
+    expect(describeScheduleChange(
+      { ...before, cycle: '["a","b"]', cycle_length: 2 },
+      { ...before, cycle: '["a","a","b"]', cycle_length: 3 },
+    )).toBe("the custom cycle");
+  });
+
+  it("treats null and undefined as the same absent value", () => {
+    expect(describeScheduleChange(
+      { ...before, exchange_time: null },
+      { ...before, exchange_time: undefined },
+    )).toBeNull();
   });
 });
 

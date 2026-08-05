@@ -1,8 +1,8 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.2.0",
-  "description": "Shared custody coordination for split households — per-child schedules, countersigned schedule swaps, a tamper-evident message log, and handoff notes. Custody days flow to the household Calendar so kids always know where they are.",
+  "version": "1.3.0",
+  "description": "Shared custody coordination for split households — per-child schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle), countersigned schedule swaps, a tamper-evident message log, and handoff notes. Every schedule change notifies the other parent. Custody days flow to the household Calendar so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",

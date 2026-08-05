@@ -42,6 +42,18 @@ function mod(n, m) {
 // more than 3 days in a row — the standard 2-2-3 arrangement.
 const TWO_TWO_THREE = ["a", "a", "b", "b", "a", "a", "a", "b", "b", "a", "a", "b", "b", "b"];
 
+// Alternating weekends over a 14-day cycle: parent A has the children on
+// school nights throughout, parent B takes every other Friday/Saturday/Sunday.
+// Fri-Sun (3 nights) rather than Sat-Sun is the common decree default.
+//
+// Like TWO_TWO_THREE this is indexed off `anchor_date`, so the anchor carries
+// the weekday alignment: day 0 must be the MONDAY of a week in which parent B
+// has the weekend. The schedule form says so where the anchor is entered.
+const ALTERNATING_WEEKENDS = [
+  "a", "a", "a", "a", "b", "b", "b",   // Mon–Thu with A, Fri–Sun with B
+  "a", "a", "a", "a", "a", "a", "a",   // the off week is entirely A's
+];
+
 /**
  * Which parent ('a' or 'b') has a child on a given date under the base rotation
  * (ignores overrides). Returns null if the date can't be resolved (bad config).
@@ -56,6 +68,9 @@ export function custodyKeyForDate(schedule, dateStr) {
 
     case "two_two_three":
       return TWO_TWO_THREE[mod(offset, 14)];
+
+    case "alternating_weekends":
+      return ALTERNATING_WEEKENDS[mod(offset, 14)];
 
     case "custom": {
       const cycle = normalizeCycle(schedule.cycle);
@@ -353,6 +368,73 @@ export function groupNotesByTransition(notes, custodyDays, todayStr) {
 /** How many notes are already filed for a given child+date. */
 export function notesForTransition(notes, childId, day) {
   return (notes || []).filter((n) => n.child_id === childId && n.note_date === day);
+}
+
+// ── Co-parent identification ────────────────────────────────────────────────
+
+/**
+ * The one other adult who can only be the co-parent, or null.
+ *
+ * Pairing exists because the message log is `couple_scoped`, and it also names
+ * the counterparty for swap requests and notifications. Making the user hunt
+ * for it in Setup is the friction; guessing it wrong would be far worse, so
+ * this only answers when there is nothing to guess.
+ *
+ * `family.members` exposes id/name/role/isAdmin/hasLogin but NOT the home
+ * household, so "the adult from the other house" is not a distinction this app
+ * can draw. Unambiguity is: exactly one other adult who could reciprocate.
+ * That is the two-parent case, i.e. the norm — and it deliberately returns null
+ * once a third adult (a new spouse) is in the space, where picking wrong would
+ * hand a private message log to the wrong person.
+ *
+ * Members with no login are excluded: pairing only takes effect when they name
+ * you back, which an account-less row can never do.
+ */
+export function soleCoParentCandidate(adultMembers, meId) {
+  if (!meId) return null;
+  const candidates = (adultMembers || [])
+    .filter((m) => m.id !== meId && m.hasLogin !== false);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+// ── Schedule change description ─────────────────────────────────────────────
+//
+// Schedules and overrides are `adult_writable`: either co-parent may change the
+// rotation directly, without the other countersigning. That is the deliberate
+// peer model (see migrations/001_init.sql) — but a change the other parent is
+// never told about is indistinguishable from one made behind their back. So
+// every write is announced, naming what moved. `audit_writes` already keeps the
+// durable record; this is what points the other parent at it.
+
+const SCHEDULE_FIELD_LABELS = [
+  ["pattern", "the rotation pattern"],
+  ["cycle", "the custom cycle"],
+  ["anchor_date", "the cycle start date"],
+  ["parent_a_id", "which parent is Parent A"],
+  ["parent_b_id", "which parent is Parent B"],
+  ["exchange_time", "the exchange time"],
+];
+
+/** Join a list the way a person would: "a", "a and b", "a, b and c". */
+export function joinPhrases(parts) {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * A human phrase for what changed between two versions of a schedule row, or
+ * null when nothing meaningful did — the caller uses null to skip the notify,
+ * so re-saving an untouched form doesn't ping the other parent.
+ *
+ * `cycle_length` is deliberately not listed: it is derived from `cycle` and
+ * would double-report every custom-cycle edit.
+ */
+export function describeScheduleChange(before, after) {
+  if (!before) return null;
+  const changed = SCHEDULE_FIELD_LABELS
+    .filter(([field]) => (before[field] ?? null) !== (after[field] ?? null))
+    .map(([, label]) => label);
+  return changed.length ? joinPhrases(changed) : null;
 }
 
 // ── Swap-request validation ─────────────────────────────────────────────────
