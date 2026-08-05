@@ -7,9 +7,7 @@
     "build": "node build.mjs",
     "dev": "node dev.mjs",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "sync-sdk": "node sync-hub-sdk.mjs",
-    "check-sdk": "node sync-hub-sdk.mjs --check"
+    "test:watch": "vitest"
   },
   "license": "MIT",
   "devDependencies": {
