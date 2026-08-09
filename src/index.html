@@ -132,7 +132,7 @@
       effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
       buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
       notesForTransition, searchableFields, describeScheduleChange,
-      soleCoParentCandidate, lockedSwapOverrides,
+      soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -219,11 +219,18 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         db(`SELECT * FROM ${P}swap_agreements`).catch(() => ({ rows: [] })),
       ]);
       const agrById = new Map(sa.rows.map(a => [a.id, a]));
-      swaps = sr.rows.map(r => mergeSwap(r, agrById.get(r.id)));
+      swaps = sr.rows.map(r => mergeSwapRecord(r, agrById.get(r.id)));
+      // An authoritative agreement survives deletion of its mutable request
+      // row. Keep agreement-only records visible instead of deriving the list
+      // from swap_requests.
+      const requestIds = new Set(sr.rows.map(r => r.id));
+      for (const agr of sa.rows) {
+        if (!requestIds.has(agr.id)) swaps.push(mergeSwapRecord({ id: agr.id }, agr));
+      }
       // Exceptions to the rotation are DERIVED from locked swaps — the
       // overrides table is no longer read or written (its rows were
       // adult_writable, so either parent could unwind an agreed swap).
-      overrides = lockedSwapOverrides(swaps);
+      overrides = lockedSwapOverrides(sa.rows);
 
       if (canManage()) {
         const [msg, hn] = await Promise.all([
@@ -232,29 +239,6 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         ]);
         messages = msg.rows; handoffs = hn.rows;
       }
-    }
-
-    function mergeSwap(r, agr) {
-      const locked = agr?.status === "locked";
-      // Locked wins over anything swap_requests says, and while locked the
-      // terms are the agreement row's server-frozen snapshot: the request row
-      // stays writable after the lock, so a post-lock 'cancelled' or term edit
-      // there must change neither the record nor the calendar.
-      const status = locked ? "locked"
-        : (r.status === "declined" || r.status === "cancelled") ? r.status : "pending";
-      const terms = locked ? {
-        child_id: agr.child_id ?? r.child_id,
-        start_date: agr.start_date ?? r.start_date,
-        end_date: agr.end_date ?? r.end_date,
-        to_parent_id: agr.to_parent_id ?? r.to_parent_id,
-        note: agr.note ?? r.note,
-      } : {};
-      return {
-        ...r, ...terms, status,
-        requester_agreed: agr?.requester_agreed ? 1 : 0,
-        responder_agreed: agr?.responder_agreed ? 1 : 0,
-        locked_at: agr?.locked_at ?? null,
-      };
     }
 
     // ── Demo seed ────────────────────────────────────────────────────────────
@@ -364,12 +348,18 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       return json;
     }
 
-    async function agree(id, agreed) {
+    async function agree(id, agreed, expectedSnapshot, resolution) {
       const res = await fetch(`/run/${APP_ID}/api/agree`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ table: "swap_agreements", id, agreed }),
+        body: JSON.stringify({
+          table: "swap_agreements", id, agreed,
+          ...(expectedSnapshot ? { expected_snapshot: expectedSnapshot } : {}),
+          ...(resolution ? { resolution } : {}),
+        }),
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not record agreement");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.error) throw new Error(json.error || "Could not record agreement");
+      return json;
     }
 
     function notifyPartner(title, body, params) {
@@ -556,9 +546,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const badge = { pending: "b-pending", locked: "b-locked", declined: "b-declined", cancelled: "b-cancelled" }[s.status];
       let actions = "";
       if (s.status === "pending") {
-        if (iAmResponder && !s.responder_agreed) {
+        if (canMemberAgreeToSwap(s, me?.id)) {
           actions = `<button class="btn btn-primary btn-sm" data-agree="${esc(s.id)}">Agree</button>
-                     <button class="btn btn-danger btn-sm" data-decline="${esc(s.id)}">Decline</button>`;
+                     ${iAmResponder ? `<button class="btn btn-danger btn-sm" data-decline="${esc(s.id)}">Decline</button>` : ""}
+                     ${mine ? `<button class="btn btn-sm" data-cancel="${esc(s.id)}">Cancel</button>` : ""}`;
         } else if (mine) {
           actions = `<span class="muted">${s.requester_agreed ? "Waiting for the other parent…" : ""}</span>
                      <button class="btn btn-sm" data-cancel="${esc(s.id)}">Cancel</button>`;
@@ -1083,7 +1074,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           await db(`INSERT INTO ${P}swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at)
             VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`,
             [id, me.id, responder_id, child_id, start_date, end_date, to_parent_id, note, now, now]);
-          await agree(id, true); // bootstraps the agreement row + sets the requester's flag
+          // Bootstraps the agreement row + sets the requester's flag, bound to
+          // the terms this tab just wrote.
+          await agree(id, true, { child_id, start_date, end_date, to_parent_id, note });
         }
         swaps.unshift({ id, requester_id: me?.id, responder_id, child_id, start_date, end_date, to_parent_id, note, status: "pending", created_at: now, updated_at: now, requester_agreed: 1, responder_agreed: 0, locked_at: null });
         closeModal();
@@ -1098,12 +1091,33 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     async function onAgree(id) {
       const s = swaps.find(x => x.id === id); if (!s) return;
       try {
-        if (!DEMO) await agree(id, true);
+        const result = DEMO ? {
+          locked: true,
+          snapshot: {
+            child_id: s.child_id, start_date: s.start_date, end_date: s.end_date,
+            to_parent_id: s.to_parent_id, note: s.note ?? null,
+          },
+        } : await agree(id, true, {
+          child_id: s.child_id, start_date: s.start_date, end_date: s.end_date,
+          to_parent_id: s.to_parent_id, note: s.note ?? null,
+        });
         // The lock is the only fact that matters: the hub froze the terms into
         // the agreement row server-side, and the schedule effect is derived
         // from that. Nothing else to persist — if this tab dies right here,
         // the next load (any parent's) derives the same calendar.
-        s.responder_agreed = 1; s.status = "locked"; s.locked_at = new Date().toISOString();
+        if (me?.id === s.requester_id) s.requester_agreed = 1;
+        if (me?.id === s.responder_id) s.responder_agreed = 1;
+        if (!result.locked) {
+          // The requester may have withdrawn their consent in another tab. A
+          // successful HTTP response records this parent's flag but does not
+          // manufacture a lock or calendar exception.
+          s.status = "pending";
+          render();
+          return;
+        }
+        if (!result.snapshot) throw new Error("The locked agreement did not return its frozen terms");
+        Object.assign(s, result.snapshot);
+        s.status = "locked"; s.locked_at = new Date().toISOString();
         overrides = lockedSwapOverrides(swaps);
         render();
         republishDerived();
@@ -1114,7 +1128,16 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     async function onDecline(id) {
       const s = swaps.find(x => x.id === id); if (!s) return;
       try {
-        if (!DEMO) await db(`UPDATE ${P}swap_requests SET status='declined', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
+        if (!DEMO) {
+          // The endpoint-only agreement status is the authority. It races the
+          // final consent under status='pending', so exactly one can win and a
+          // writable request row can never resurrect the decision.
+          await agree(id, false, undefined, "declined");
+          // Keep the presentation row in sync when possible. The endpoint-only
+          // agreement already made the decision durable, so mirror failure must
+          // not tell the parent their decline failed.
+          await db(`UPDATE ${P}swap_requests SET status='declined', updated_at=? WHERE id=?`, [new Date().toISOString(), id]).catch(() => {});
+        }
         s.status = "declined";
         render();
         notifyPartner("Swap declined", `${me?.name} declined the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
@@ -1125,7 +1148,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const s = swaps.find(x => x.id === id); if (!s) return;
       if (!await hubConfirm({ message: "Cancel this swap request?" })) return;
       try {
-        if (!DEMO) await db(`UPDATE ${P}swap_requests SET status='cancelled', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
+        if (!DEMO) {
+          await agree(id, false, undefined, "cancelled");
+          await db(`UPDATE ${P}swap_requests SET status='cancelled', updated_at=? WHERE id=?`, [new Date().toISOString(), id]).catch(() => {});
+        }
         s.status = "cancelled";
         render();
       } catch (e) { hubAlert(e.message); }

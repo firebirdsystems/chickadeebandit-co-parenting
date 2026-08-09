@@ -38,6 +38,16 @@ describe("manifest.json", () => {
     expect(Array.isArray(manifest.data_access.reads)).toBe(true);
     expect(Array.isArray(manifest.data_access.writes)).toBe(true);
   });
+
+  it("makes declined and cancelled swap requests terminal for agreement locking", () => {
+    expect(manifest.agreements.swap_agreements).toMatchObject({
+      init_from_table: "swap_requests",
+      resolution_values: {
+        requester_id: "cancelled",
+        responder_id: "declined",
+      },
+    });
+  });
 });
 
 // ── ai_access SQL file validation ─────────────────────────────────────────────

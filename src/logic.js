@@ -116,10 +116,9 @@ export function normalizeCycle(cycle) {
  * never from the still-writable swap_requests row, and never from a
  * separately-written overrides row. That is what makes a locked swap binding
  * on the calendar: nothing either parent can write after the lock changes
- * what was agreed. Input is the merged swap shape (mergeSwap in index.html
- * substitutes the snapshot terms once locked); rows locked before the
- * snapshot existed, or tampered into a term-less state, produce nothing
- * rather than a wrong day.
+ * what was agreed. Input may be the agreement rows directly; legacy or
+ * incomplete rows without a full snapshot produce nothing rather than a wrong
+ * day.
  *
  * `created_at: locked_at` feeds effectiveForDate's later-wins rule: of two
  * locked swaps covering the same day, the later countersign prevails.
@@ -136,6 +135,54 @@ export function lockedSwapOverrides(swaps) {
       parent_id: s.to_parent_id,
       created_at: s.locked_at ?? "",
     }));
+}
+
+/**
+ * Combines the mutable request presentation row with its endpoint-owned
+ * agreement state. Once the first consent binds a snapshot, every displayed
+ * term comes strictly from that snapshot, including while still pending;
+ * request fields are never a fallback. The request may be absent entirely
+ * after lock without erasing the record.
+ */
+export function mergeSwapRecord(request = {}, agreement) {
+  const locked = agreement?.status === "locked";
+  const resolved = agreement?.status === "declined" || agreement?.status === "cancelled";
+  const hasSnapshot = !!agreement
+    && ["child_id", "start_date", "end_date", "to_parent_id"]
+      .some((column) => agreement[column] != null);
+  const bound = locked || (hasSnapshot
+    && (resolved || agreement.requester_agreed || agreement.responder_agreed));
+  const status = locked ? "locked"
+    : resolved ? agreement.status
+    : (request.status === "declined" || request.status === "cancelled") ? request.status : "pending";
+  const terms = bound ? {
+    child_id: agreement.child_id,
+    start_date: agreement.start_date,
+    end_date: agreement.end_date,
+    to_parent_id: agreement.to_parent_id,
+    note: agreement.note,
+  } : {};
+  return {
+    ...request,
+    requester_id: agreement?.requester_id ?? request.requester_id,
+    responder_id: agreement?.responder_id ?? request.responder_id,
+    created_at: request.created_at ?? agreement?.locked_at ?? agreement?.updated_at ?? null,
+    ...terms,
+    status,
+    requester_agreed: agreement?.requester_agreed ? 1 : 0,
+    responder_agreed: agreement?.responder_agreed ? 1 : 0,
+    locked_at: agreement?.locked_at ?? null,
+  };
+}
+
+/** A party whose durable flag is absent may retry consent. This primarily
+ * recovers a request insert that committed before its bootstrap /api/agree call
+ * failed, but it also keeps the action symmetric for either participant. */
+export function canMemberAgreeToSwap(swap, memberId) {
+  if (!swap || !memberId || swap.status !== "pending") return false;
+  if (swap.requester_id === memberId) return !swap.requester_agreed;
+  if (swap.responder_id === memberId) return !swap.responder_agreed;
+  return false;
 }
 
 /**

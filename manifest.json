@@ -68,7 +68,8 @@
       "kind": "adult_writable",
       "retain_days": {
         "default": 400,
-        "timestamp_column": "day"
+        "timestamp_column": "day",
+        "tier": "evidentiary"
       }
     },
     "swap_requests": {
@@ -280,6 +281,10 @@
       "locked_at_column": "locked_at",
       "updated_at_column": "updated_at",
       "init_from_table": "swap_requests",
+      "resolution_values": {
+        "requester_id": "cancelled",
+        "responder_id": "declined"
+      },
       "init_columns": [
         "requester_id",
         "responder_id"

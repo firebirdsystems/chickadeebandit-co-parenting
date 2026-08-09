@@ -18,7 +18,7 @@ import {
   upcomingTransitions,
   groupNotesByTransition,
   notesForTransition, searchableFields, describeScheduleChange,
-  soleCoParentCandidate, lockedSwapOverrides,
+  soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -261,6 +261,88 @@ describe("lockedSwapOverrides", () => {
     ]);
     expect(effectiveForDate(s, derived, "2026-01-06")).toMatchObject({ parent_id: PA, override_id: "second" });
     expect(effectiveForDate(s, derived, "2026-01-08")).toMatchObject({ parent_id: PB, override_id: "first" });
+  });
+});
+
+describe("mergeSwapRecord", () => {
+  const request = {
+    id: "sw-1", requester_id: PA, responder_id: PB,
+    child_id: "mutable-kid", start_date: "2026-02-01", end_date: "2026-02-02",
+    to_parent_id: PA, note: "mutable", status: "cancelled",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const agreement = {
+    id: "sw-1", requester_id: PA, responder_id: PB, status: "locked",
+    child_id: "frozen-kid", start_date: "2026-03-01", end_date: "2026-03-02",
+    to_parent_id: PB, note: "frozen", locked_at: "2026-01-03T00:00:00Z",
+    requester_agreed: 1, responder_agreed: 1,
+  };
+
+  it("uses only frozen agreement terms after lock", () => {
+    expect(mergeSwapRecord(request, agreement)).toMatchObject({
+      status: "locked", child_id: "frozen-kid", start_date: "2026-03-01",
+      end_date: "2026-03-02", to_parent_id: PB, note: "frozen",
+    });
+  });
+
+  it("keeps a locked agreement when its request was deleted", () => {
+    expect(mergeSwapRecord({ id: "sw-1" }, agreement)).toMatchObject({
+      id: "sw-1", status: "locked", child_id: "frozen-kid",
+      requester_id: PA, responder_id: PB,
+    });
+  });
+
+  it("does not fall back to mutable terms for an incomplete snapshot", () => {
+    expect(mergeSwapRecord(request, { ...agreement, child_id: null }).child_id).toBeNull();
+  });
+
+  it("shows the first party's frozen terms while the agreement is still pending", () => {
+    const pending = { ...agreement, status: "pending", responder_agreed: 0, locked_at: null };
+    expect(mergeSwapRecord({ ...request, status: "pending" }, pending)).toMatchObject({
+      status: "pending", child_id: "frozen-kid", start_date: "2026-03-01",
+      end_date: "2026-03-02", to_parent_id: PB, note: "frozen",
+    });
+  });
+
+  it("lets either party recover when their durable agreement flag is missing", () => {
+    const pending = { ...request, status: "pending", requester_agreed: 0, responder_agreed: 0 };
+    expect(canMemberAgreeToSwap(pending, PA)).toBe(true);
+    expect(canMemberAgreeToSwap(pending, PB)).toBe(true);
+    expect(canMemberAgreeToSwap({ ...pending, requester_agreed: 1 }, PA)).toBe(false);
+    expect(canMemberAgreeToSwap({ ...pending, status: "cancelled" }, PB)).toBe(false);
+  });
+
+  it("treats the endpoint-only terminal status as authoritative", () => {
+    expect(mergeSwapRecord(
+      { ...request, status: "pending" },
+      { ...agreement, status: "declined", responder_agreed: 0, locked_at: null },
+    ).status).toBe("declined");
+  });
+
+  it("keeps frozen terms after cancellation clears the last consent flag", () => {
+    expect(mergeSwapRecord(
+      { ...request, child_id: "tampered-kid", start_date: "2026-04-01" },
+      {
+        ...agreement, status: "cancelled", requester_agreed: 0,
+        responder_agreed: 0, locked_at: null,
+      },
+    )).toMatchObject({
+      status: "cancelled", child_id: "frozen-kid", start_date: "2026-03-01",
+      end_date: "2026-03-02", to_parent_id: PB, note: "frozen",
+    });
+  });
+
+  it("renders a cancelled agreement snapshot after its request was deleted", () => {
+    expect(mergeSwapRecord(
+      { id: "sw-1" },
+      {
+        ...agreement, status: "cancelled", requester_agreed: 0,
+        responder_agreed: 0, locked_at: null,
+      },
+    )).toMatchObject({
+      status: "cancelled", child_id: "frozen-kid", start_date: "2026-03-01",
+      end_date: "2026-03-02", to_parent_id: PB,
+    });
   });
 });
 
