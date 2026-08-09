@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(join(__dirname, "../manifest.json"), "utf-8"));
+const entrypoint = readFileSync(join(__dirname, "../src/index.html"), "utf-8");
 
 const VALID_STORAGE   = ["kv", "db", "none"];
 const VALID_AUDIENCES = ["everyone", "adults", "children"];
@@ -47,6 +48,12 @@ describe("manifest.json", () => {
         responder_id: "declined",
       },
     });
+  });
+
+  it("imports every Phase 4 pairing helper used by the browser entrypoint", () => {
+    const logicImport = entrypoint.match(/import\s*\{([\s\S]*?)\}\s*from\s*["']\.\/logic\.js["']/)?.[1] ?? "";
+    expect(logicImport).toMatch(/\bpairingState\b/);
+    expect(logicImport).toMatch(/\bpartitionMessagesBySession\b/);
   });
 });
 

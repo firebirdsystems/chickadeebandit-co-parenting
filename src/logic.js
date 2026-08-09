@@ -547,3 +547,67 @@ export function validateSwap(swap, todayStr) {
 export function searchableFields(message, authorName = "") {
   return [message.body, authorName];
 }
+
+/**
+ * Which of the four pairing states the app should show.
+ *
+ * "awaiting" and "ended" both look like "I named them, they don't name me
+ * back", and telling a parent to wait for a confirmation that is never coming
+ * is the worse of the two failures. They are distinguished by evidence that the
+ * pairing was once live: any message exchanged with this partner. The composer
+ * only ever opens on a reciprocal pairing, so a message with someone is proof
+ * the two of you were paired.
+ *
+ * Deliberately ANY message, not only a session-stamped one. Every message
+ * written before sessions existed carries none, so the narrower rule would tell
+ * every parent whose pairing ended before that release to keep waiting — which
+ * is the whole installed base at the moment this ships.
+ *
+ * @param hadRecord true when a message exists between the caller and partnerId
+ * @returns {"unpaired"|"awaiting"|"ended"|"active"}
+ */
+export function pairingState({ partnerId, reciprocal, hadRecord }) {
+  if (!partnerId) return "unpaired";
+  if (reciprocal) return "active";
+  return hadRecord ? "ended" : "awaiting";
+}
+
+/**
+ * Split a message log into the CURRENT pairing's record and earlier ones.
+ *
+ * A parent keeps every message that names them, for as long as retention says
+ * — including the record of a co-parent relationship that has since ended. Run
+ * together in one thread those read as a single conversation with the person
+ * you are paired with today, which is wrong and, for a record both parents may
+ * rely on, misleading.
+ *
+ * A message belongs to the current pairing when it carries the current session
+ * id. Messages written before sessions existed carry none, so they fall back to
+ * who they were exchanged WITH: in a household that never re-paired that is the
+ * current co-parent and the thread stays whole, and in one that did the older
+ * relationship separates out on its own. No backfill can improve on this —
+ * the participant columns already say everything the session id would have.
+ *
+ * @returns {{ current: object[], earlier: Array<{ counterpartId: string|null, messages: object[] }> }}
+ *   `earlier` is grouped by the other party, newest group first.
+ */
+export function partitionMessagesBySession(messages, meId, sessionId, partnerId) {
+  const counterpartOf = (m) => (m.author_id === meId ? m.recipient_id : m.author_id) ?? null;
+  const isCurrent = (m) => (m.session_id
+    ? m.session_id === sessionId
+    : counterpartOf(m) === partnerId && !!partnerId);
+
+  const current = [];
+  const groups = new Map();
+  for (const message of messages ?? []) {
+    if (isCurrent(message)) { current.push(message); continue; }
+    const key = counterpartOf(message);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(message);
+  }
+  const sentAt = (list) => list.reduce((latest, m) => (m.sent_at > latest ? m.sent_at : latest), "");
+  const earlier = [...groups.entries()]
+    .map(([counterpartId, list]) => ({ counterpartId, messages: list }))
+    .sort((a, b) => sentAt(b.messages).localeCompare(sentAt(a.messages)));
+  return { current, earlier };
+}
