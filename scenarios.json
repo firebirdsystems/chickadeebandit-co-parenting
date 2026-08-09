@@ -2,309 +2,156 @@
   "scenarios": [
     {
       "name": "messages are visible only to the two linked co-parents; direct writes are endpoint-only",
-      "members": {
-        "a": "adult",
-        "b": "adult",
-        "outsider": "adult"
-      },
+      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": [
-            "{{a}}",
-            "{{b}}",
-            "sess-ab",
-            "2026-01-01T00:00:00Z"
-          ]
+          "params": ["{{a}}", "{{b}}", "sess-ab", "2026-01-01T00:00:00Z"]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": [
-            "{{b}}",
-            "{{a}}",
-            "sess-ab",
-            "2026-01-01T00:00:00Z"
-          ]
+          "params": ["{{b}}", "{{a}}", "sess-ab", "2026-01-01T00:00:00Z"]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-          "params": [
-            "m1",
-            "{{a}}",
-            "{{b}}",
-            "pickup at 5",
-            "2026-01-01T00:00:00Z",
-            "sess-ab"
-          ]
+          "params": ["m1", "{{a}}", "{{b}}", "pickup at 5", "2026-01-01T00:00:00Z", "sess-ab"]
         },
         {
           "action": "db",
           "as": "b",
           "sql": "SELECT id, body FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowCount": 1,
-            "rowsContain": [
-              {
-                "id": "m1"
-              }
-            ]
-          }
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "m1" }] }
         },
         {
           "action": "db",
           "as": "outsider",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowCount": 0
-          }
+          "expect": { "status": 200, "rowCount": 0 }
         },
         {
           "action": "db",
           "as": "a",
           "sql": "UPDATE app_co_parenting__messages SET body = 'edited' WHERE id = ?",
-          "params": [
-            "m1"
-          ],
-          "expect": {
-            "status": 403,
-            "errorIncludes": "endpoint"
-          }
+          "params": ["m1"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
         }
       ]
     },
     {
       "name": "a replacement co-parent cannot read the previous pairing's record, and both original parents keep it",
-      "members": {
-        "a": "adult",
-        "b": "adult",
-        "c": "adult"
-      },
+      "members": { "a": "adult", "b": "adult", "c": "adult" },
       "steps": [
         {
           "comment": "A and B were paired under sess-ab and exchanged one message.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-          "params": [
-            "m-ab",
-            "{{a}}",
-            "{{b}}",
-            "pickup at 5",
-            "2026-01-01T00:00:00Z",
-            "sess-ab"
-          ]
+          "params": ["m-ab", "{{a}}", "{{b}}", "pickup at 5", "2026-01-01T00:00:00Z", "sess-ab"]
         },
         {
-          "comment": "A message from before sessions existed. Nothing backfills these, so the live installed base is full of them and they must behave identically.",
+          "comment": "A NULL-session row. The current hub stamps every message, so this never occurs in practice — the read policy must not depend on the stamp anyway.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at) VALUES (?, ?, ?, ?, ?)",
-          "params": [
-            "m-legacy",
-            "{{b}}",
-            "{{a}}",
-            "swapping Thursday",
-            "2025-06-01T00:00:00Z"
-          ]
+          "params": ["m-legacy", "{{b}}", "{{a}}", "swapping Thursday", "2025-06-01T00:00:00Z"]
         },
         {
           "comment": "B has since re-paired with C. The partner endpoint clears the ex-partner's session, so A's row keeps B but loses sess-ab.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, NULL, ?)",
-          "params": [
-            "{{a}}",
-            "{{b}}",
-            "2026-01-01T00:00:00Z"
-          ]
+          "params": ["{{a}}", "{{b}}", "2026-01-01T00:00:00Z"]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": [
-            "{{b}}",
-            "{{c}}",
-            "sess-bc",
-            "2026-02-01T00:00:00Z"
-          ]
+          "params": ["{{b}}", "{{c}}", "sess-bc", "2026-02-01T00:00:00Z"]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": [
-            "{{c}}",
-            "{{b}}",
-            "sess-bc",
-            "2026-02-01T00:00:00Z"
-          ]
+          "params": ["{{c}}", "{{b}}", "sess-bc", "2026-02-01T00:00:00Z"]
         },
         {
-          "comment": "The point of the phase: C is named in no A-B message, so C reads none of them \u2014 even though C's partner B is.",
+          "comment": "The point of the phase: C is named in no A-B message, so C reads none of them — even though C's partner B is.",
           "action": "db",
           "as": "c",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowCount": 0
-          }
+          "expect": { "status": 200, "rowCount": 0 }
         },
         {
           "comment": "B keeps their own record even though B's active session is now sess-bc.",
           "action": "db",
           "as": "b",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowCount": 2,
-            "rowsContain": [
-              {
-                "id": "m-ab"
-              },
-              {
-                "id": "m-legacy"
-              }
-            ]
-          }
+          "expect": { "status": 200, "rowCount": 2, "rowsContain": [{ "id": "m-ab" }, { "id": "m-legacy" }] }
         },
         {
           "comment": "So does A, who has no active session at all.",
           "action": "db",
           "as": "a",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowCount": 2,
-            "rowsContain": [
-              {
-                "id": "m-ab"
-              },
-              {
-                "id": "m-legacy"
-              }
-            ]
-          }
+          "expect": { "status": 200, "rowCount": 2, "rowsContain": [{ "id": "m-ab" }, { "id": "m-legacy" }] }
         },
         {
-          "comment": "Counting is a read like any other \u2014 C cannot learn the record exists.",
+          "comment": "Counting is a read like any other — C cannot learn the record exists.",
           "action": "db",
           "as": "c",
           "sql": "SELECT COUNT(*) AS n FROM app_co_parenting__messages",
-          "expect": {
-            "status": 200,
-            "rowsContain": [
-              {
-                "n": 0
-              }
-            ]
-          }
+          "expect": { "status": 200, "rowsContain": [{ "n": 0 }] }
         }
       ]
     },
     {
       "name": "swap requests are visible only to the two parties",
-      "members": {
-        "a": "adult",
-        "b": "adult",
-        "outsider": "adult"
-      },
+      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-          "params": [
-            "sw1",
-            "{{a}}",
-            "{{b}}",
-            "child-1",
-            "2026-02-01",
-            "2026-02-03",
-            "{{b}}",
-            "2026-01-01T00:00:00Z",
-            "2026-01-01T00:00:00Z"
-          ]
+          "params": ["sw1", "{{a}}", "{{b}}", "child-1", "2026-02-01", "2026-02-03", "{{b}}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]
         },
         {
           "action": "db",
           "as": "b",
           "sql": "SELECT id FROM app_co_parenting__swap_requests",
-          "expect": {
-            "status": 200,
-            "rowCount": 1,
-            "rowsContain": [
-              {
-                "id": "sw1"
-              }
-            ]
-          }
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "sw1" }] }
         },
         {
           "action": "db",
           "as": "outsider",
           "sql": "SELECT id FROM app_co_parenting__swap_requests",
-          "expect": {
-            "status": 200,
-            "rowCount": 0
-          }
+          "expect": { "status": 200, "rowCount": 0 }
         }
       ]
     },
     {
       "name": "handoff notes are adult-read, endpoint-write; children cannot read them",
-      "members": {
-        "adult": "adult",
-        "kid": "child"
-      },
+      "members": { "adult": "adult", "kid": "child" },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          "params": [
-            "hn1",
-            "child-1",
-            "2026-02-01",
-            "meds",
-            "allergy meds at noon",
-            "{{adult}}",
-            "2026-01-01T00:00:00Z"
-          ]
+          "params": ["hn1", "child-1", "2026-02-01", "meds", "allergy meds at noon", "{{adult}}", "2026-01-01T00:00:00Z"]
         },
         {
           "action": "db",
           "as": "adult",
           "sql": "SELECT id FROM app_co_parenting__handoff_notes",
-          "expect": {
-            "status": 200,
-            "rowCount": 1
-          }
+          "expect": { "status": 200, "rowCount": 1 }
         },
         {
           "action": "db",
           "as": "kid",
           "sql": "SELECT id FROM app_co_parenting__handoff_notes",
-          "expect": {
-            "status": 403,
-            "errorIncludes": "adult"
-          }
+          "expect": { "status": 403, "errorIncludes": "adult" }
         },
         {
           "action": "db",
           "as": "adult",
           "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          "params": [
-            "hn2",
-            "child-1",
-            "2026-02-02",
-            "school",
-            "direct write",
-            "{{adult}}",
-            "2026-01-01T00:00:00Z"
-          ],
-          "expect": {
-            "status": 403,
-            "errorIncludes": "endpoint"
-          }
+          "params": ["hn2", "child-1", "2026-02-02", "school", "direct write", "{{adult}}", "2026-01-01T00:00:00Z"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
         }
       ]
     }

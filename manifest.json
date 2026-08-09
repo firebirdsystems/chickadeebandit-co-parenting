@@ -123,7 +123,10 @@
     "max_length": 5000,
     "notify": {
       "title": "New co-parenting message",
-      "body": "Open Co-Parenting to read it."
+      "body": "Open Co-Parenting to read it.",
+      "url_params": {
+        "view": "messages"
+      }
     }
   },
   "append_only_records": {

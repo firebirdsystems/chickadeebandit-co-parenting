@@ -549,27 +549,34 @@ export function searchableFields(message, authorName = "") {
 }
 
 /**
+ * The other party on a message, from `meId`'s perspective. The one rule for
+ * "who was this exchanged with" — the thread partition and the UI's
+ * history checks must never disagree about it.
+ */
+export function counterpartOf(message, meId) {
+  return (message.author_id === meId ? message.recipient_id : message.author_id) ?? null;
+}
+
+/**
  * Which of the four pairing states the app should show.
  *
  * "awaiting" and "ended" both look like "I named them, they don't name me
- * back", and telling a parent to wait for a confirmation that is never coming
- * is the worse of the two failures. They are distinguished by evidence that the
- * pairing was once live: any message exchanged with this partner. The composer
- * only ever opens on a reciprocal pairing, so a message with someone is proof
- * the two of you were paired.
+ * back" from the pairing row alone, so the hub says which one it is:
+ * `proposal_pending` is true while the caller's own proposal is live (their
+ * row still carries the session it was minted with) and false once the other
+ * side tore the pairing down (that path clears the session). Message history
+ * deliberately plays no part — it cannot tell a live re-proposal to a former
+ * co-parent from the ended pairing it follows, and both misreadings are cruel:
+ * one tells a parent to wait forever, the other tells them a pairing they just
+ * proposed is already over.
  *
- * Deliberately ANY message, not only a session-stamped one. Every message
- * written before sessions existed carries none, so the narrower rule would tell
- * every parent whose pairing ended before that release to keep waiting — which
- * is the whole installed base at the moment this ships.
- *
- * @param hadRecord true when a message exists between the caller and partnerId
+ * @param proposalPending the hub's `proposal_pending` for the caller
  * @returns {"unpaired"|"awaiting"|"ended"|"active"}
  */
-export function pairingState({ partnerId, reciprocal, hadRecord }) {
+export function pairingState({ partnerId, reciprocal, proposalPending }) {
   if (!partnerId) return "unpaired";
   if (reciprocal) return "active";
-  return hadRecord ? "ended" : "awaiting";
+  return proposalPending ? "awaiting" : "ended";
 }
 
 /**
@@ -581,33 +588,35 @@ export function pairingState({ partnerId, reciprocal, hadRecord }) {
  * you are paired with today, which is wrong and, for a record both parents may
  * rely on, misleading.
  *
- * A message belongs to the current pairing when it carries the current session
- * id. Messages written before sessions existed carry none, so they fall back to
- * who they were exchanged WITH: in a household that never re-paired that is the
- * current co-parent and the thread stays whole, and in one that did the older
- * relationship separates out on its own. No backfill can improve on this —
- * the participant columns already say everything the session id would have.
+ * A message belongs to the current pairing exactly when it carries the current
+ * session id: the hub stamps one onto every message it accepts, and there is
+ * no current session unless the pairing is reciprocal. Everything else —
+ * including the record of a pairing that just ended, while no new one is
+ * live — groups by the other party, so one person's history stays contiguous
+ * even across several of their own past sessions.
+ *
+ * (The app shipped with no installed base, so no message predates session
+ * stamping; a null session id never occurs and simply files as "earlier".)
  *
  * @returns {{ current: object[], earlier: Array<{ counterpartId: string|null, messages: object[] }> }}
- *   `earlier` is grouped by the other party, newest group first.
+ *   `earlier` is grouped by the other party, most recent group first.
  */
-export function partitionMessagesBySession(messages, meId, sessionId, partnerId) {
-  const counterpartOf = (m) => (m.author_id === meId ? m.recipient_id : m.author_id) ?? null;
-  const isCurrent = (m) => (m.session_id
-    ? m.session_id === sessionId
-    : counterpartOf(m) === partnerId && !!partnerId);
-
+export function partitionMessagesBySession(messages, meId, sessionId) {
   const current = [];
-  const groups = new Map();
+  const groups = new Map();   // counterpartId -> { messages, latest }
   for (const message of messages ?? []) {
-    if (isCurrent(message)) { current.push(message); continue; }
-    const key = counterpartOf(message);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(message);
+    if (sessionId && message.session_id === sessionId) { current.push(message); continue; }
+    const key = counterpartOf(message, meId);
+    let group = groups.get(key);
+    if (!group) { group = { messages: [], latest: "" }; groups.set(key, group); }
+    group.messages.push(message);
+    // Tracked while bucketing: the renderer re-partitions on every keystroke
+    // of the search box, so the comparator must not rescan each group.
+    if ((message.sent_at ?? "") > group.latest) group.latest = message.sent_at;
   }
-  const sentAt = (list) => list.reduce((latest, m) => (m.sent_at > latest ? m.sent_at : latest), "");
   const earlier = [...groups.entries()]
-    .map(([counterpartId, list]) => ({ counterpartId, messages: list }))
-    .sort((a, b) => sentAt(b.messages).localeCompare(sentAt(a.messages)));
+    .map(([counterpartId, group]) => ({ counterpartId, messages: group.messages, latest: group.latest }))
+    .sort((a, b) => b.latest.localeCompare(a.latest))
+    .map(({ counterpartId, messages: list }) => ({ counterpartId, messages: list }));
   return { current, earlier };
 }

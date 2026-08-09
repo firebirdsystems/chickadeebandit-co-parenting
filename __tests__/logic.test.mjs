@@ -758,19 +758,21 @@ describe("searchableFields", () => {
 
 describe("pairingState", () => {
   it("is unpaired with no partner, and active once both have named each other", () => {
-    expect(pairingState({ partnerId: null, reciprocal: false, hadRecord: false })).toBe("unpaired");
-    expect(pairingState({ partnerId: PB, reciprocal: true, hadRecord: true })).toBe("active");
+    expect(pairingState({ partnerId: null, reciprocal: false, proposalPending: false })).toBe("unpaired");
+    expect(pairingState({ partnerId: PB, reciprocal: true, proposalPending: false })).toBe("active");
   });
 
-  it("is awaiting when the pairing was only ever proposed", () => {
-    expect(pairingState({ partnerId: PB, reciprocal: false, hadRecord: false })).toBe("awaiting");
+  it("is awaiting while the hub reports the caller's own proposal live", () => {
+    // Includes a RE-proposal to a former co-parent: message history with them
+    // must not read as "ended" when the invitation on the table is new.
+    expect(pairingState({ partnerId: PB, reciprocal: false, proposalPending: true })).toBe("awaiting");
   });
 
-  it("is ended — not awaiting — once a record proves the pairing was live", () => {
+  it("is ended — not awaiting — when the other side tore the pairing down", () => {
     // The difference the parent feels: "they'll confirm any moment" versus
-    // "this is over". Telling someone to wait on a pairing that is over is the
-    // worse of the two ways to be wrong.
-    expect(pairingState({ partnerId: PB, reciprocal: false, hadRecord: true })).toBe("ended");
+    // "this is over". The hub clears the survivor's session on unpair, so this
+    // is reported even for a pairing that never exchanged a message.
+    expect(pairingState({ partnerId: PB, reciprocal: false, proposalPending: false })).toBe("ended");
   });
 });
 
@@ -781,7 +783,7 @@ describe("partitionMessagesBySession", () => {
 
   it("keeps the current session's messages in the live thread", () => {
     const { current, earlier } = partitionMessagesBySession(
-      [msg({ id: "m1", session_id: "s2" })], PA, "s2", PB,
+      [msg({ id: "m1", session_id: "s2" })], PA, "s2",
     );
     expect(current.map(m => m.id)).toEqual(["m1"]);
     expect(earlier).toEqual([]);
@@ -792,29 +794,37 @@ describe("partitionMessagesBySession", () => {
       msg({ id: "old", recipient_id: "ex", session_id: "s1", sent_at: "2025-01-01T00:00:00Z" }),
       msg({ id: "new", session_id: "s2", sent_at: "2026-01-01T00:00:00Z" }),
     ];
-    const { current, earlier } = partitionMessagesBySession(rows, PA, "s2", PB);
+    const { current, earlier } = partitionMessagesBySession(rows, PA, "s2");
     expect(current.map(m => m.id)).toEqual(["new"]);
     expect(earlier).toHaveLength(1);
     expect(earlier[0].counterpartId).toBe("ex");
     expect(earlier[0].messages.map(m => m.id)).toEqual(["old"]);
   });
 
-  it("treats pre-session messages with the current co-parent as the live thread", () => {
-    // Nothing backfills session ids onto old rows, so the common household
-    // that never re-paired must not have its whole history filed as 'earlier'.
+  it("files everything as earlier while there is no live session", () => {
+    // Awaiting / ended / unpaired all read back a null session, so the record
+    // of the pairing that just ended sits under its own heading, never in a
+    // live thread whose composer cannot work.
     const { current, earlier } = partitionMessagesBySession(
-      [msg({ id: "legacy", session_id: null })], PA, "s2", PB,
-    );
-    expect(current.map(m => m.id)).toEqual(["legacy"]);
-    expect(earlier).toEqual([]);
-  });
-
-  it("files pre-session messages with someone else under that person", () => {
-    const { current, earlier } = partitionMessagesBySession(
-      [msg({ id: "legacy", recipient_id: "ex", session_id: null })], PA, "s2", PB,
+      [msg({ id: "old", session_id: "s1" })], PA, null,
     );
     expect(current).toEqual([]);
-    expect(earlier[0].counterpartId).toBe("ex");
+    expect(earlier[0].counterpartId).toBe(PB);
+  });
+
+  it("keeps one person's history contiguous across their own past sessions", () => {
+    // The same couple, split and re-paired: their earlier sessions are one
+    // group, not one archive block per session.
+    const rows = [
+      msg({ id: "a", session_id: "s1", sent_at: "2024-01-01T00:00:00Z" }),
+      msg({ id: "b", session_id: "s2", sent_at: "2025-01-01T00:00:00Z" }),
+      msg({ id: "c", session_id: "s3", sent_at: "2026-01-01T00:00:00Z" }),
+    ];
+    const { current, earlier } = partitionMessagesBySession(rows, PA, "s3");
+    expect(current.map(m => m.id)).toEqual(["c"]);
+    expect(earlier).toHaveLength(1);
+    expect(earlier[0].counterpartId).toBe(PB);
+    expect(earlier[0].messages.map(m => m.id)).toEqual(["a", "b"]);
   });
 
   it("groups each former co-parent separately, most recent first", () => {
@@ -822,13 +832,13 @@ describe("partitionMessagesBySession", () => {
       msg({ id: "a", recipient_id: "ex1", session_id: "s1", sent_at: "2024-01-01T00:00:00Z" }),
       msg({ id: "b", recipient_id: "ex2", session_id: "s2", sent_at: "2025-01-01T00:00:00Z" }),
     ];
-    const { earlier } = partitionMessagesBySession(rows, PA, "s3", PB);
+    const { earlier } = partitionMessagesBySession(rows, PA, "s3");
     expect(earlier.map(g => g.counterpartId)).toEqual(["ex2", "ex1"]);
   });
 
   it("reads the counterpart from either participant column", () => {
     const { earlier } = partitionMessagesBySession(
-      [msg({ id: "in", author_id: "ex", recipient_id: PA, session_id: "s1" })], PA, "s2", PB,
+      [msg({ id: "in", author_id: "ex", recipient_id: PA, session_id: "s1" })], PA, "s2",
     );
     expect(earlier[0].counterpartId).toBe("ex");
   });

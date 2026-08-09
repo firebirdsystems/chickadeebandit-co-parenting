@@ -137,7 +137,7 @@
       buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
       notesForTransition, searchableFields, describeScheduleChange,
       soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
-      pairingState, partitionMessagesBySession,
+      pairingState, partitionMessagesBySession, counterpartOf,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -172,6 +172,10 @@
     // earlier one's instead of running them together. Null until the pairing is
     // reciprocal — there is no session until both parents have named each other.
     let partnerSessionId = null;
+    // The hub's word on whether a non-reciprocal pairing row is a live proposal
+    // ("awaiting") or the survivor of an unpair ("ended"). Client state cannot
+    // tell those apart — message history certainly can't.
+    let partnerProposalPending = false;
     let schedules = [], overrides = [], swaps = [], messages = [], handoffs = [];
 let searchQ = "";       // in-app search (see logic.js searchableFields)
     let custodyDays = [];                        // materialized rotation (agenda/glance source)
@@ -207,16 +211,24 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       memberMap = new Map(members.map(m => [m.id, m]));
     }
 
+    function applyPartnerStatus(status) {
+      partnerId = status.partner_id ?? null;
+      partnerReciprocal = !!status.reciprocal;
+      partnerSessionId = status.session_id ?? null;
+      partnerProposalPending = !!status.proposal_pending;
+    }
+
     async function loadPartner() {
-      if (DEMO) { partnerId = "demo-mom"; partnerReciprocal = true; partnerSessionId = "demo-session"; return; }
+      if (DEMO) { partnerId = "demo-mom"; partnerReciprocal = true; partnerSessionId = "demo-session"; partnerProposalPending = false; return; }
       try {
         const res = await fetch(`/run/${APP_ID}/api/partner`);
-        const status = res.ok ? await res.json() : {};
-        partnerId = status.partner_id ?? null;
-        partnerReciprocal = !!status.reciprocal;
-        partnerSessionId = status.session_id ?? null;
-      } catch { partnerId = null; partnerReciprocal = false; partnerSessionId = null; }
+        applyPartnerStatus(res.ok ? await res.json() : {});
+      } catch { applyPartnerStatus({}); }
     }
+
+    /** The one SELECT for the thread — the initial load and every refresh must
+     *  render the same record, so they share the query. */
+    const loadMessages = () => db(`SELECT * FROM ${P}messages ORDER BY sent_at ASC`).catch(() => null);
 
     async function loadData() {
       if (DEMO) { seedDemo(); return; }
@@ -245,10 +257,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
       if (canManage()) {
         const [msg, hn] = await Promise.all([
-          db(`SELECT * FROM ${P}messages ORDER BY sent_at ASC`).catch(() => ({ rows: [] })),
+          loadMessages(),
           db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`).catch(() => ({ rows: [] })),
         ]);
-        messages = msg.rows; handoffs = hn.rows;
+        messages = msg?.rows ?? []; handoffs = hn.rows;
       }
     }
 
@@ -349,14 +361,30 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     }
 
     // ── Endpoints ────────────────────────────────────────────────────────────
-    async function appendRecord(name, data) {
-      const res = await fetch(`${APPEND_RECORD}/${encodeURIComponent(name)}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
+    /**
+     * The one request-JSON-or-throw wrapper for every hub endpoint this app
+     * calls. The hub can answer 200-with-{error} as well as a bare error
+     * status; checking both in one place keeps the five callers from
+     * drifting — the pairing endpoints used to skip the body check and
+     * silently "succeed" on an error payload.
+     */
+    async function requestJson(path, { method = "POST", body, fallbackError }) {
+      const res = await fetch(path, {
+        method,
+        ...(body === undefined ? {} : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.error) throw new Error(json.error || "Could not save");
+      if (!res.ok || json.error) throw new Error(json.error || fallbackError);
       return json;
+    }
+
+    function appendRecord(name, data) {
+      return requestJson(`${APPEND_RECORD}/${encodeURIComponent(name)}`, {
+        body: data, fallbackError: "Could not save",
+      });
     }
 
     /**
@@ -377,42 +405,44 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         destructive: true,
       });
       if (!ok) return;
+      const btn = document.getElementById("unpair");
+      if (btn) { btn.disabled = true; btn.textContent = "Ending…"; }
       try {
-        const res = await fetch(`/run/${APP_ID}/api/partner`, { method: "DELETE" });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not end the pairing");
+        await requestJson(`/run/${APP_ID}/api/partner`, {
+          method: "DELETE", fallbackError: "Could not end the pairing",
+        });
         await loadPartner();
         render();
-      } catch (e) { hubAlert(e.message); }
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = "End pairing"; }
+        hubAlert(e.message);
+      }
     }
 
     /**
      * The message log's only write path. Unlike the append-record lane it
      * replaces, the hub decides the recipient from the reciprocal pairing and
      * refuses outright when there isn't one, so a message cannot be addressed
-     * to anyone but the co-parent who is currently paired back.
+     * to anyone but the co-parent who is currently paired back. The hub also
+     * sends the recipient's push itself, applying their preview preference —
+     * the manifest's generic text is the default, and the message body is used
+     * only after an explicit opt-in — so the send path must not notify again.
      */
-    async function pairedMessage(payload) {
-      const res = await fetch(`/run/${APP_ID}/api/paired-message`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+    function pairedMessage(payload) {
+      return requestJson(`/run/${APP_ID}/api/paired-message`, {
+        body: payload, fallbackError: "Could not send",
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.error) throw new Error(json.error || "Could not send");
-      return json;
     }
 
-    async function agree(id, agreed, expectedSnapshot, resolution) {
-      const res = await fetch(`/run/${APP_ID}/api/agree`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+    function agree(id, agreed, expectedSnapshot, resolution) {
+      return requestJson(`/run/${APP_ID}/api/agree`, {
+        body: {
           table: "swap_agreements", id, agreed,
           ...(expectedSnapshot ? { expected_snapshot: expectedSnapshot } : {}),
           ...(resolution ? { resolution } : {}),
-        }),
+        },
+        fallbackError: "Could not record agreement",
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.error) throw new Error(json.error || "Could not record agreement");
-      return json;
     }
 
     function notifyPartner(title, body, params) {
@@ -650,21 +680,27 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
      * co-parent is unambiguous the whole thing collapses to one button here;
      * otherwise it still explains itself rather than just refusing.
      */
-    /** True when a message survives from a live pairing with this partner. */
-    function hadRecordWith(pid) {
-      return !!pid && messages.some(m => (m.author_id === me?.id ? m.recipient_id : m.author_id) === pid);
+    /** True when any message survives from a pairing with this member. */
+    function historyWith(pid) {
+      return !!pid && messages.some(m => counterpartOf(m, me?.id) === pid);
     }
 
     function currentPairingState() {
       return pairingState({
-        partnerId, reciprocal: partnerReciprocal, hadRecord: hadRecordWith(partnerId),
+        partnerId, reciprocal: partnerReciprocal, proposalPending: partnerProposalPending,
       });
     }
 
+    /** Why the log is closed — one string, whichever branch renders it. */
+    const PAIRING_WHY = "The message log is private to the two of you, so it opens once you've each named the other.";
+
     function pairingPrompt(why) {
       const state = currentPairingState();
+      // No one-click pair button for someone this parent has a record with:
+      // right after ending that pairing, the obvious suggestion is the person
+      // they just left. Setup still offers them — deliberately, radio + save.
       const suggested = partnerId ? null : likelyCoParent();
-      if (suggested) {
+      if (suggested && !historyWith(suggested.id)) {
         return `<div class="empty">${esc(why)}
           <br><br><button class="btn btn-primary" data-pair="${esc(suggested.id)}">Pair with ${esc(suggested.name)}</button></div>`;
       }
@@ -701,45 +737,79 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
      * Failures are swallowed on purpose — a read receipt is a courtesy, and
      * neither it nor a refresh is worth an error dialog over the record itself.
      */
+    let refreshInFlight = null;    // concurrent callers share one refresh
+    let messagesVersion = 0;       // bumped on any local append so a stale SELECT can't clobber it
+    let markReadDone = false;      // one receipt per batch of unread mail, not one per tab focus
+
     async function refreshMessages() {
       if (DEMO || !canManage()) return;
-      const res = await db(`SELECT * FROM ${P}messages ORDER BY sent_at ASC`).catch(() => null);
-      if (res) {
-        const changed = res.rows.length !== messages.length
-          || res.rows.some((row, i) => row.id !== messages[i]?.id || row.read_at !== messages[i]?.read_at);
-        messages = res.rows;
-        // Re-rendering replaces the composer, so a refresh that lands while
-        // someone is mid-sentence must put their draft back — and must not run
-        // at all when there is nothing new to show.
-        if (changed && view === "messages") {
-          const draft = document.getElementById("msg-body")?.value ?? "";
-          render();
-          const box = document.getElementById("msg-body");
-          if (box && draft) { box.value = draft; box.setSelectionRange(draft.length, draft.length); }
+      // visibilitychange fires on every tab/app switch and screen unlock, and
+      // nothing serializes the SELECTs — without this, two in-flight refreshes
+      // can resolve out of order and the older one wins.
+      if (refreshInFlight) return refreshInFlight;
+      refreshInFlight = (async () => {
+        // The pairing itself can change while the tab is open — the partner
+        // confirms, unpairs, or rotates — and the thread partition keys on the
+        // session, so refresh both together or the first message of a
+        // fresh pairing files under "Earlier record" with no composer.
+        const versionBefore = messagesVersion;
+        const partnerBefore = [partnerId, partnerReciprocal, partnerSessionId, partnerProposalPending].join("|");
+        const [res] = await Promise.all([loadMessages(), loadPartner()]);
+        const partnerChanged = [partnerId, partnerReciprocal, partnerSessionId, partnerProposalPending].join("|") !== partnerBefore;
+        let changed = false;
+        // A row appended locally after this SELECT left is newer than the
+        // result — adopting the result would visibly unsend that message.
+        if (res && versionBefore === messagesVersion) {
+          changed = res.rows.length !== messages.length
+            || res.rows.some((row, i) => row.id !== messages[i]?.id || row.read_at !== messages[i]?.read_at);
+          if (changed) {
+            messages = res.rows;
+            markReadDone = false;   // fresh rows may need a receipt
+          }
         }
-      }
-      // Only the recipient's own unread rows are touched. This remains valid
-      // after unpairing: historical messages are still readable, and opening
-      // that record is enough to earn their recipient-only receipt.
-      const unread = messages.some(m => m.recipient_id === me?.id && !m.read_at);
-      if (!unread) return;
-      await pairedMessage({ action: "mark_read" }).catch(() => null);
+        if ((changed || partnerChanged) && view === "messages") render();
+
+        // Only the recipient's own unread rows are touched. This remains valid
+        // after unpairing: historical messages are still readable, and opening
+        // that record is enough to earn their recipient-only receipt. The
+        // response patches the local rows — without that, `unread` stays true
+        // and every tab focus re-posts a receipt the hub already recorded.
+        const unread = messages.some(m => m.recipient_id === me?.id && !m.read_at);
+        if (!unread || markReadDone) return;
+        markReadDone = true;
+        const receipt = await pairedMessage({ action: "mark_read" })
+          .catch(() => { markReadDone = false; return null; });   // retry on next open
+        if (receipt?.read_at) {
+          for (const m of messages) {
+            if (m.recipient_id === me?.id && !m.read_at) m.read_at = receipt.read_at;
+          }
+        }
+      })().finally(() => { refreshInFlight = null; });
+      return refreshInFlight;
     }
 
     // ── Messages view ────────────────────────────────────────────────────────
     function renderMessages(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">The message log is private to the two parents.</div>`; return; }
-      const active = !!partnerId && partnerReciprocal;
+      const active = currentPairingState() === "active";
       // Without an active pairing there is nothing to send, but there may still
       // be a record to READ: the parent's own history does not disappear
       // because a relationship ended. Show the prompt above it and drop only
       // the composer, rather than returning early and hiding the record.
       if (!active && !messages.length) {
-        el.innerHTML = pairingPrompt(
-          "The message log is private to the two of you, so it opens once you've each named the other.");
+        el.innerHTML = pairingPrompt(PAIRING_WHY);
         wirePairingPrompt(el);
         return;
       }
+      // Captured before the rebuild: a background refresh must not steal the
+      // caret from someone mid-sentence or mid-search, wipe their draft, or
+      // yank a reader scrolled up in the archive down to the newest message.
+      const prevThread = el.querySelector(".thread");
+      const stickToLatest = !prevThread
+        || prevThread.scrollTop + prevThread.clientHeight >= prevThread.scrollHeight - 40;
+      const draft = el.querySelector("#msg-body")?.value ?? "";
+      const focusedId = document.activeElement?.id ?? null;
+
       const shown = searchQ
         ? messages.filter(m => searchMatch(searchQ, searchableFields(m, memberName(m.author_id))))
         : messages;
@@ -757,9 +827,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
       // Messages from a co-parent relationship that has ended stay readable to
       // the two people who wrote them, but they are a separate record — shown
-      // above the current thread under their own heading, oldest relationship
-      // first, never merged into the conversation with today's co-parent.
-      const { current, earlier } = partitionMessagesBySession(shown, me?.id, partnerSessionId, partnerId);
+      // above the current thread under their own heading, most recent
+      // relationship first, never merged into the conversation with today's
+      // co-parent.
+      const { current, earlier } = partitionMessagesBySession(shown, me?.id, partnerSessionId);
       const archive = earlier.map(group => `
         <div class="archive-group">
           <div class="archive-head">Earlier record — with ${esc(group.counterpartId ? memberName(group.counterpartId) : "a former co-parent")}</div>
@@ -777,14 +848,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         <div class="compose">
           <textarea id="msg-body" data-autofocus placeholder="Message ${esc(memberName(partnerId))}…" maxlength="5000"></textarea>
           <button class="btn btn-primary" id="msg-send">Send</button>
-        </div>` : pairingPrompt(
-          "The message log is private to the two of you, so it opens once you've each named the other.")}`;
-      // Only this pane is redrawn, so put the caret back after typing.
+        </div>` : pairingPrompt(PAIRING_WHY)}`;
       el.querySelector("#search")?.addEventListener("input", (e) => {
         searchQ = e.target.value;
-        renderMessages(el);
-        const box = el.querySelector("#search");
-        if (box) { box.focus(); box.setSelectionRange(searchQ.length, searchQ.length); }
+        renderMessages(el);   // focus/caret restore below covers this redraw too
       });
       if (active) {
         el.querySelector("#msg-send").addEventListener("click", onSendMessage);
@@ -794,8 +861,21 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       } else {
         wirePairingPrompt(el);
       }
-      focusAutofocus(el);
-      const thr = el.querySelector(".thread"); thr.scrollTop = thr.scrollHeight;
+      // Restore what the rebuild destroyed. Autofocus only on a fresh open —
+      // on a redraw it would steal the caret from wherever it was.
+      const box = el.querySelector("#msg-body");
+      if (box && draft) box.value = draft;
+      if (focusedId === "search" || focusedId === "msg-body") {
+        const field = el.querySelector(`#${focusedId}`);
+        if (field) {
+          field.focus();
+          field.setSelectionRange(field.value.length, field.value.length);
+        }
+      } else if (!prevThread) {
+        focusAutofocus(el);
+      }
+      const thr = el.querySelector(".thread");
+      thr.scrollTop = stickToLatest ? thr.scrollHeight : prevThread.scrollTop;
     }
 
     function fmtDateTime(iso) {
@@ -1108,12 +1188,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
       try {
         if (!DEMO) {
-          const res = await fetch(`/run/${APP_ID}/api/partner`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ partner_id: chosen }),
-          });
-          if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not save");
-          await loadPartner();
+          // The POST answers with the resulting pairing status, so no
+          // follow-up GET is needed.
+          applyPartnerStatus(await requestJson(`/run/${APP_ID}/api/partner`, {
+            body: { partner_id: chosen }, fallbackError: "Could not save",
+          }));
         } else { partnerId = chosen; partnerReciprocal = true; }
         // Notified directly rather than via notifyPartner, which targets the
         // *paired* partner — and from this side the pairing may not be mutual
@@ -1306,6 +1385,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       } catch (e) { hubAlert(e.message); }
     }
 
+    // Minted per DRAFT, not per attempt: a retry after a timeout must replay
+    // the same message, not append a duplicate to a permanent record — a key
+    // regenerated on every click never dedupes anything.
+    let draftIdempotencyKey = null;
+
     async function onSendMessage() {
       const ta = document.getElementById("msg-body");
       const body = ta.value.trim();
@@ -1313,31 +1397,41 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const btn = document.getElementById("msg-send");
       btn.disabled = true; btn.textContent = "…";
       let now = new Date().toISOString();
+      draftIdempotencyKey ??= crypto.randomUUID();
       try {
-        let id = crypto.randomUUID();
-        const sessionId = partnerSessionId;
+        let id = draftIdempotencyKey;
+        let sessionId = partnerSessionId;
         if (!DEMO) {
           // The hub derives the recipient from the reciprocal pairing and
           // stamps the author, the timestamp and the session itself — we send
-          // only the text. An idempotency key makes a retried send replay
-          // rather than double-post to a permanent record.
-          const r = await pairedMessage({ action: "send", content: body, idempotency_key: id });
+          // only the text.
+          const r = await pairedMessage({ action: "send", content: body, idempotency_key: draftIdempotencyKey });
           id = r.id ?? id;
           now = r.sent_at ?? now;
+          sessionId = r.session_id ?? sessionId;   // authoritative, survives a rotation this tab missed
         }
-        messages.push({ id, author_id: me?.id, recipient_id: partnerId, body, sent_at: now, session_id: sessionId });
+        draftIdempotencyKey = null;   // the next draft gets its own key
+        messagesVersion++;            // an in-flight refresh SELECT predates this row — it must not clobber it
+        // A refresh that resolved during the send may already carry the row.
+        if (!messages.some(m => m.id === id)) {
+          messages.push({ id, author_id: me?.id, recipient_id: partnerId, body, sent_at: now, read_at: null, session_id: sessionId });
+        }
+        ta.value = "";                // sent — don't let the redraw restore it as a draft
         render();
-        // The hub applies the recipient's preview preference. The manifest's
-        // generic text is the default; the message body is used only after an
-        // explicit opt-in.
       } catch (e) {
-        btn.disabled = false; btn.textContent = "Send";
-        // The pairing can end between page load and send — say so plainly
-        // rather than surfacing a bare 409, and re-read the pairing so the
-        // view stops offering a composer that cannot work.
-        if (/reciprocal|no partner/i.test(e.message)) {
+        // Looked up fresh: a background refresh may have replaced the DOM the
+        // captured button belonged to.
+        const sendBtn = document.getElementById("msg-send");
+        if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = "Send"; }
+        // The pairing can end — or rotate — between page load and send. All
+        // three of the hub's stale-pairing 409s land here: say so plainly,
+        // re-read the pairing so the view stops offering a composer that
+        // cannot work, and keep the unsent words; they are the user's.
+        if (/reciprocal|no partner|session changed/i.test(e.message)) {
           await loadPartner();
           render();
+          const box = document.getElementById("msg-body");
+          if (box) { box.value = body; box.setSelectionRange(body.length, body.length); }
           hubAlert("That pairing is no longer active, so the message wasn't sent.");
           return;
         }

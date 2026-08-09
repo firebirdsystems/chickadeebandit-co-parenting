@@ -13,16 +13,17 @@
 -- the reciprocal session in partner_config; nothing the client sends can choose
 -- it. It is never rewritten — an immutable log needs an immutable session.
 --
--- LEGACY ROWS STAY NULL, DELIBERATELY. Both participant columns are encrypted
--- at rest, and migrations run outside the app-DB codec (raw D1), so any value
--- written here would land as plaintext and never match an encrypted read —
--- and grouping legacy rows by pair would mean guessing at ciphertext. Access to
--- them does not depend on a backfill: the messages row policy sets
--- `read_participant_only`, so each parent reads the rows that NAME them,
--- whatever session those rows carry and whoever they are paired with now.
--- Legacy messages therefore stay readable to both original parties forever and
--- stay invisible to any later partner, who is named in none of them. The app
--- presents them as "Earlier messages", separate from the current pairing.
+-- NO BACKFILL, AND NONE NEEDED. This app has no installed base: no message
+-- predates session stamping, so there are no legacy NULL rows to repair.
+-- (The participant and session columns are `_id`-suffixed and therefore stored
+-- in PLAINTEXT by the app-DB codec — a backfill keyed on them would be
+-- perfectly feasible; it just has nothing to do.) Read access never depended
+-- on the session either: the messages row policy sets `read_participant_only`,
+-- so each parent reads the rows that NAME them, whatever session those rows
+-- carry and whoever they are paired with now. An ended pairing's messages
+-- therefore stay readable to both original parties forever and stay invisible
+-- to any later partner, who is named in none of them. The app presents them
+-- under "Earlier record", separate from the current pairing.
 --
 -- read_at: recipient-only read receipts, required by the paired_messages
 -- endpoint. NULL until the recipient marks the thread read; the sender never
