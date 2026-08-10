@@ -1,8 +1,8 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.5.0",
-  "description": "Shared custody coordination for split households — per-child schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle), countersigned schedule swaps whose terms are frozen server-side at approval, a tamper-evident message log, and handoff notes. Every schedule change notifies the other parent. Custody days flow to the household Calendar so kids always know where they are.",
+  "version": "1.6.0",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle) that BOTH parents countersign before they take effect, countersigned one-off swaps whose terms are frozen server-side at approval, a tamper-evident message log, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -14,7 +14,8 @@
   ],
   "data_access": {
     "reads": [
-      "family.members"
+      "family.members",
+      "family.preferences"
     ],
     "writes": []
   },
@@ -40,7 +41,11 @@
     "cycle_length",
     "exchange_time",
     "day",
-    "is_transition"
+    "is_transition",
+    "timezone",
+    "effective_from",
+    "effective_to",
+    "materializer_version"
   ],
   "partner_link": {
     "table": "partner_config",
@@ -57,15 +62,28 @@
       "endpoint_writes_only": true
     },
     "schedules": {
-      "kind": "adult_writable",
+      "kind": "endpoint_only",
+      "read": "everyone",
       "audit_writes": true
     },
     "overrides": {
-      "kind": "adult_writable",
+      "kind": "endpoint_only",
+      "read": "adult",
+      "audit_writes": true
+    },
+    "schedule_amendments": {
+      "kind": "endpoint_only",
+      "read": "adult",
+      "audit_writes": true
+    },
+    "schedule_versions": {
+      "kind": "endpoint_only",
+      "read": "everyone",
       "audit_writes": true
     },
     "custody_days": {
-      "kind": "adult_writable",
+      "kind": "endpoint_only",
+      "read": "everyone",
       "retain_days": {
         "default": 400,
         "timestamp_column": "day",
@@ -256,6 +274,42 @@
         "on_removed": "keep"
       }
     ],
+    "schedule_amendments": [
+      {
+        "column": "proposed_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_a_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_b_id",
+        "on_removed": "keep"
+      }
+    ],
+    "schedule_versions": [
+      {
+        "column": "proposed_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_a_id",
+        "on_removed": "keep"
+      },
+      {
+        "column": "parent_b_id",
+        "on_removed": "keep"
+      }
+    ],
     "swap_agreements": [
       {
         "column": "requester_id",
@@ -276,6 +330,109 @@
     ]
   },
   "agreements": {
+    "schedule_versions": {
+      "party_mode": "steward_households",
+      "participant_columns": [
+        "household_a_id",
+        "household_b_id"
+      ],
+      "agreement_columns": {
+        "household_a_id": "household_a_agreed",
+        "household_b_id": "household_b_agreed"
+      },
+      "status_column": "status",
+      "pending_value": "pending",
+      "locked_value": "agreed",
+      "locked_at_column": "agreed_at",
+      "updated_at_column": "updated_at",
+      "init_from_table": "schedule_amendments",
+      "resolution_values": {
+        "household_a_id": "withdrawn",
+        "household_b_id": "declined"
+      },
+      "init_columns": [
+        "household_a_id",
+        "household_b_id",
+        "child_id",
+        "base_version_id"
+      ],
+      "snapshot_columns": [
+        "proposed_by",
+        "child_id",
+        "parent_a_id",
+        "parent_b_id",
+        "pattern",
+        "cycle",
+        "cycle_length",
+        "anchor_date",
+        "exchange_time",
+        "timezone",
+        "effective_from",
+        "effective_to",
+        "rationale",
+        "base_version_id"
+      ],
+      "version_series": {
+        "scope_columns": [
+          "child_id"
+        ],
+        "base_version_column": "base_version_id",
+        "superseded_value": "superseded"
+      },
+      "proposal": {
+        "allowed_columns": [
+          "child_id",
+          "parent_a_id",
+          "parent_b_id",
+          "pattern",
+          "cycle",
+          "cycle_length",
+          "anchor_date",
+          "exchange_time",
+          "timezone",
+          "effective_from",
+          "effective_to",
+          "rationale",
+          "base_version_id"
+        ],
+        "required_columns": [
+          "child_id",
+          "parent_a_id",
+          "parent_b_id",
+          "pattern",
+          "cycle",
+          "cycle_length",
+          "anchor_date",
+          "timezone"
+        ],
+        "writer_column": "proposed_by",
+        "created_at_column": "created_at",
+        "updated_at_column": "updated_at",
+        "allowed_values": {
+          "pattern": [
+            "alternating_weeks",
+            "two_two_three",
+            "alternating_weekends",
+            "custom"
+          ]
+        },
+        "max_text_lengths": {
+          "child_id": 120,
+          "parent_a_id": 120,
+          "parent_b_id": 120,
+          "pattern": 32,
+          "cycle": 400,
+          "anchor_date": 10,
+          "exchange_time": 5,
+          "timezone": 64,
+          "effective_from": 10,
+          "effective_to": 10,
+          "rationale": 500,
+          "base_version_id": 64
+        },
+        "max_open": 12
+      }
+    },
     "swap_agreements": {
       "participant_columns": [
         "requester_id",
@@ -308,11 +465,61 @@
       ]
     }
   },
-  "store_acls": {
-    "calendar_events": {
-      "write": {
-        "require_role": "adult"
-      }
+  "cycle_projection": {
+    "source_table": "schedule_versions",
+    "status_column": "status",
+    "active_value": "agreed",
+    "scope_column": "child_id",
+    "cycle_column": "cycle",
+    "anchor_column": "anchor_date",
+    "timezone_column": "timezone",
+    "effective_from_column": "effective_from",
+    "effective_to_column": "effective_to",
+    "party_columns": {
+      "a": "parent_a_id",
+      "b": "parent_b_id"
+    },
+    "target_table": "custody_days",
+    "target_columns": {
+      "id": "id",
+      "day": "day",
+      "party": "parent_id",
+      "previous_party": "from_parent_id",
+      "transition": "is_transition",
+      "scope": "child_id",
+      "source_version": "source_version_id",
+      "materializer_version": "materializer_version",
+      "updated_at": "updated_at",
+      "title": "title",
+      "subtitle": "subtitle",
+      "source": "source"
+    },
+    "copy_columns": {
+      "exchange_time": "exchange_time"
+    },
+    "templates": {
+      "title": "{scope} with {party}",
+      "subtitle": "With {party}",
+      "transition_title": "{scope} → {party}",
+      "transition_subtitle": "Handoff {time}",
+      "time_column": "exchange_time"
+    },
+    "exceptions": {
+      "table": "swap_agreements",
+      "status_column": "status",
+      "active_value": "locked",
+      "scope_column": "child_id",
+      "start_column": "start_date",
+      "end_column": "end_date",
+      "party_column": "to_parent_id",
+      "ordering_column": "locked_at"
+    },
+    "horizon_days": 120,
+    "refresh_below_days": 30,
+    "calendar_export": {
+      "store_key": "calendar_events",
+      "title_template": "{scope} with {party}",
+      "source_label": "Co-Parenting"
     }
   },
   "agenda": {
@@ -387,6 +594,29 @@
           { "key": "reason", "label": "Reason" },
           { "key": "requested_by", "label": "Requested by", "format": "member" },
           { "key": "locked_at", "label": "Countersigned", "format": "datetime" }
+        ]
+      },
+      {
+        "id": "standing_schedule",
+        "title": "Standing schedule history",
+        "description": "Every agreed version of the standing rotation, with the terms exactly as frozen when both parents countersigned, and when each was superseded.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT agreed_at AS agreed_at, child_id AS child, pattern AS pattern, cycle AS cycle, anchor_date AS anchor_date, exchange_time AS exchange_time, timezone AS timezone, parent_a_id AS parent_a, parent_b_id AS parent_b, proposed_by AS proposed_by, rationale AS rationale, status AS status FROM app_co_parenting__schedule_versions WHERE status IN ('agreed','superseded') AND agreed_at >= :range_start AND agreed_at <= :range_end ORDER BY agreed_at"
+        },
+        "columns": [
+          { "key": "agreed_at", "label": "Countersigned", "format": "datetime" },
+          { "key": "child", "label": "Child", "format": "member" },
+          { "key": "pattern", "label": "Pattern" },
+          { "key": "cycle", "label": "Day-by-day cycle" },
+          { "key": "anchor_date", "label": "Cycle starts", "format": "date" },
+          { "key": "exchange_time", "label": "Exchange time" },
+          { "key": "timezone", "label": "Timezone" },
+          { "key": "parent_a", "label": "Parent A", "format": "member" },
+          { "key": "parent_b", "label": "Parent B", "format": "member" },
+          { "key": "proposed_by", "label": "Proposed by", "format": "member" },
+          { "key": "rationale", "label": "Reason" },
+          { "key": "status", "label": "State" }
         ]
       },
       {

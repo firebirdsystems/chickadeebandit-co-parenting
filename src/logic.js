@@ -62,6 +62,14 @@ export function custodyKeyForDate(schedule, dateStr) {
   if (!schedule || !schedule.anchor_date) return null;
   const offset = daysBetween(schedule.anchor_date, dateStr);
 
+  // An agreed version carries the CANONICAL compiled cycle, whatever pattern it
+  // was chosen from, and that cycle is what the hub materializer projects. So
+  // when one is present it wins outright: the in-app month grid and the server's
+  // custody days are then the same arithmetic over the same array, and cannot
+  // drift because a named pattern's shape changed between releases.
+  const compiled = normalizeCycle(schedule.cycle);
+  if (compiled.length) return compiled[mod(offset, compiled.length)];
+
   switch (schedule.pattern) {
     case "alternating_weeks":
       return mod(offset, 14) < 7 ? "a" : "b";
@@ -93,6 +101,35 @@ export function keyToParentId(schedule, key) {
 /** custodyKeyForDate + keyToParentId in one call. */
 export function baseParentForDate(schedule, dateStr) {
   return keyToParentId(schedule, custodyKeyForDate(schedule, dateStr));
+}
+
+/**
+ * Compile a chosen pattern into the CANONICAL agreed form: an array of 'a'/'b'
+ * party tags, one per day, repeating from the anchor.
+ *
+ * This is the piece that lets the hub materialize custody days without knowing
+ * anything about this app. The hub cannot run app JavaScript, so a schedule that
+ * said only `pattern: "two_two_three"` would be a promise the server could not
+ * read. Compiling at PROPOSE time means what the two parents countersign is the
+ * literal day-by-day rule — which also settles a subtler problem: a later
+ * release that "fixed" the shape of a named pattern would otherwise silently
+ * redefine an agreement that was already signed.
+ *
+ * Returns [] for an unusable pattern, which callers treat as "cannot propose".
+ */
+export function compileCycle(pattern, customCycle) {
+  switch (pattern) {
+    case "alternating_weeks":
+      return [...Array(7).fill("a"), ...Array(7).fill("b")];
+    case "two_two_three":
+      return [...TWO_TWO_THREE];
+    case "alternating_weekends":
+      return [...ALTERNATING_WEEKENDS];
+    case "custom":
+      return normalizeCycle(customCycle);
+    default:
+      return [];
+  }
 }
 
 /** Accepts a JSON string or an array; returns a clean array of 'a'/'b'. */
@@ -238,6 +275,13 @@ export function mergeBlocks(assignments) {
 /**
  * Build hub calendar_events for one or more children over a date window.
  *
+ * NO LONGER WRITTEN BY THIS APP as of 1.6.0 — the hub's `cycle_projection`
+ * materializer owns both the `calendar_events` store key and the `custody_days`
+ * table, and the manifest no longer carries a store write grant for the key.
+ * Kept because it is the same arithmetic the in-app month grid renders from, and
+ * because deleting it would leave the app unable to preview a schedule it has
+ * not yet proposed.
+ *
  *   schedules  — array of schedule rows (one per child)
  *   overrides  — flat array of override rows (any children)
  *   opts.startDate / opts.endDate — 'YYYY-MM-DD' window
@@ -289,13 +333,18 @@ export function fmtExchangeTime(hhmm) {
 }
 
 /**
- * Materialize the rotation into one row per child per day, for the hub's
- * `agenda` (Today) and `glance` surfaces.
+ * Materialize the rotation into one row per child per day.
  *
- * Why materialize at all: `agenda`/`glance` are single governed SELECTs the hub
- * runs itself — they can't call this rotation engine. So the app writes the
- * resolved days into app_co_parenting__custody_days and the hub reads that.
- * The rows are pure derived state; rebuilding them from scratch is always safe.
+ * NOT the source of `custody_days` any more. As of 1.6.0 that table is
+ * `endpoint_only` and the hub's `cycle_projection` materializer is its only
+ * writer, in the same transaction that locks the agreement — because a
+ * projection the app could write was a projection either parent could rewrite
+ * without touching what was agreed, and a browser that closed mid-write left
+ * Today, the glance tile and the calendar disagreeing.
+ *
+ * What it is now: the PREVIEW engine. It renders the days a proposal would
+ * produce, before anyone has countersigned it and therefore before the hub has
+ * anything to project.
  *
  *   schedules / overrides — same shapes as buildCalendarEvents
  *   opts.startDate / opts.endDate — 'YYYY-MM-DD' window (inclusive)
@@ -475,15 +524,140 @@ export function soleCoParentCandidate(adultMembers, meId) {
   return candidates.length === 1 ? candidates[0] : null;
 }
 
-// ── Schedule change description ─────────────────────────────────────────────
+// ── Standing schedule versions and amendments ───────────────────────────────
 //
-// Schedules and overrides are `adult_writable`: either co-parent may change the
-// rotation directly, without the other countersigning. That is the deliberate
-// peer model (see migrations/001_init.sql) — but a change the other parent is
-// never told about is indistinguishable from one made behind their back. So
-// every write is announced, naming what moved. `audit_writes` already keeps the
-// durable record; this is what points the other parent at it.
+// The standing rotation is an AGREEMENT, not a preference. Nothing here writes
+// it: an amendment is proposed through the hub (which resolves the two
+// participating households itself), and it becomes the schedule only once both
+// parents countersign, at which point the hub freezes the terms and supersedes
+// the version it amends.
+//
+// The app's job is to say clearly which of the five states each version is in,
+// and never to present a proposal as though it were the schedule.
 
+/**
+ * Merge the mutable amendment row with its hub-owned agreement state.
+ *
+ * Mirrors `mergeSwapRecord`, and for the same reason: once the first signature
+ * binds a snapshot, every displayed term comes from that snapshot and never
+ * from the amendment row, so what the second parent reads is exactly what they
+ * would be signing. Before that — and for a proposal nobody has signed yet —
+ * the amendment row is the only source there is.
+ */
+export function mergeScheduleVersion(amendment = {}, agreement) {
+  const status = agreement?.status ?? "draft";
+  const bound = !!agreement
+    && ["child_id", "pattern", "cycle", "anchor_date"].some((column) => agreement[column] != null);
+  const terms = bound ? {
+    child_id: agreement.child_id,
+    parent_a_id: agreement.parent_a_id,
+    parent_b_id: agreement.parent_b_id,
+    pattern: agreement.pattern,
+    cycle: agreement.cycle,
+    cycle_length: agreement.cycle_length,
+    anchor_date: agreement.anchor_date,
+    exchange_time: agreement.exchange_time,
+    timezone: agreement.timezone,
+    effective_from: agreement.effective_from,
+    effective_to: agreement.effective_to,
+    rationale: agreement.rationale,
+    base_version_id: agreement.base_version_id,
+    proposed_by: agreement.proposed_by,
+  } : {};
+  return {
+    ...amendment,
+    ...terms,
+    id: agreement?.id ?? amendment.id,
+    status,
+    household_a_agreed: agreement?.household_a_agreed ? 1 : 0,
+    household_b_agreed: agreement?.household_b_agreed ? 1 : 0,
+    agreed_at: agreement?.agreed_at ?? null,
+  };
+}
+
+/** The version currently in force for a child, or null. */
+export function agreedVersion(versions, childId) {
+  return (versions || []).find((v) => v.status === "agreed" && v.child_id === childId) ?? null;
+}
+
+/** The open proposal for a child, or null. At most one can exist per child at a
+ *  time in practice; the newest wins if a tenant somehow has two. */
+export function openAmendment(versions, childId) {
+  return (versions || [])
+    .filter((v) => (v.status === "pending" || v.status === "draft") && v.child_id === childId)
+    .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))[0] ?? null;
+}
+
+/**
+ * How an open proposal should read to `meId`.
+ *
+ * The app cannot see household ids — deliberately, since they are the hub's
+ * business — so "which side am I" is derived from who proposed: the hub always
+ * writes the PROPOSER's household into the first participant column. That is
+ * exact for the ordinary two-parent case. It can be wrong only for a co-parent
+ * seat that was demoted and refilled, where the new steward did not propose the
+ * amendment they are now a party to; the consequence is a label, never an
+ * authorization — the hub resolves the caller's real household on every act.
+ *
+ * `alreadySigned` is how that guess gets corrected. It is the hub's own answer,
+ * returned by /api/agree as `already_agreed` when this side's consent was
+ * on the row before the request. Without it a mis-sided view offers a
+ * countersign button that reports success and changes nothing, forever; with
+ * it, one click settles the question the app cannot answer by itself. It is
+ * only ever an override toward "signed" — a guess is never promoted to a fact
+ * in the direction that would offer MORE authority.
+ *
+ * @returns {"awaiting_them"|"awaiting_you"|"unsigned"}
+ */
+export function amendmentStance(amendment, meId, alreadySigned = false) {
+  if (!amendment) return "unsigned";
+  if (alreadySigned) return "awaiting_them";
+  const iProposed = amendment.proposed_by === meId;
+  const mine = iProposed ? amendment.household_a_agreed : amendment.household_b_agreed;
+  const theirs = iProposed ? amendment.household_b_agreed : amendment.household_a_agreed;
+  if (mine && !theirs) return "awaiting_them";
+  if (!mine) return "awaiting_you";
+  return "unsigned";
+}
+
+/**
+ * Who must be told about a standing-schedule change.
+ *
+ * NOT the pairing. Pairing is an in-app act that exists to open the private
+ * message log, and it is entirely possible — common, even, early on — for two
+ * co-parents to be full members of the space without having completed it. A
+ * schedule amendment routed through the pairing would then reach nobody, which
+ * is precisely the failure the plan forbids: "do not depend on partner
+ * notification configuration to make a material change visible; use the space
+ * membership/co-parent relationship as the delivery source."
+ *
+ * So the audience is derived from membership. The other co-parent is an adult
+ * with a login who is an admin — the derived-role definition, as far as
+ * `family.members` can see it (it deliberately exposes no home household). If
+ * that yields nobody, this falls back to every other adult rather than
+ * returning empty: for ACCESS, ambiguity must fail closed, but for a
+ * NOTIFICATION about a change the recipient can already read, failing closed
+ * means silence, and silence is the bug being fixed.
+ */
+export function scheduleNoticeAudience(members, meId) {
+  const others = (members || []).filter((m) => m.id !== meId && m.role === "adult");
+  const stewards = others.filter((m) => m.isAdmin && m.hasLogin !== false);
+  return (stewards.length ? stewards : others).map((m) => m.id);
+}
+
+/** Whether `meId` may still record consent on this proposal. */
+export function canSignAmendment(amendment, meId, alreadySigned = false) {
+  if (!amendment || (amendment.status !== "pending" && amendment.status !== "draft")) return false;
+  return amendmentStance(amendment, meId, alreadySigned) !== "awaiting_them";
+}
+
+/**
+ * A human phrase for what an amendment changes about the version it amends, or
+ * null when it changes nothing meaningful.
+ *
+ * Shown to the parent being asked to sign. `cycle_length` is deliberately not
+ * listed: it is derived from `cycle` and would double-report every edit.
+ */
 const SCHEDULE_FIELD_LABELS = [
   ["pattern", "the rotation pattern"],
   ["cycle", "the custom cycle"],
@@ -491,6 +665,9 @@ const SCHEDULE_FIELD_LABELS = [
   ["parent_a_id", "which parent is Parent A"],
   ["parent_b_id", "which parent is Parent B"],
   ["exchange_time", "the exchange time"],
+  ["timezone", "the timezone custody days are counted in"],
+  ["effective_from", "when it starts"],
+  ["effective_to", "when it ends"],
 ];
 
 /** Join a list the way a person would: "a", "a and b", "a, b and c". */
@@ -500,12 +677,9 @@ export function joinPhrases(parts) {
 }
 
 /**
- * A human phrase for what changed between two versions of a schedule row, or
- * null when nothing meaningful did — the caller uses null to skip the notify,
- * so re-saving an untouched form doesn't ping the other parent.
- *
- * `cycle_length` is deliberately not listed: it is derived from `cycle` and
- * would double-report every custom-cycle edit.
+ * The changed-fields phrase itself. Null means nothing meaningful moved, which
+ * the caller uses to refuse a no-op proposal rather than ask the other parent
+ * to countersign an identical schedule.
  */
 export function describeScheduleChange(before, after) {
   if (!before) return null;

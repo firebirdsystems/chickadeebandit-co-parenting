@@ -1,0 +1,309 @@
+{
+  "scenarios": [
+    {
+      "name": "a parent proposes a standing schedule and the agreed version drives the calendar",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"setup\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "The standing schedule is an agreement",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "No schedules yet.",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-newsch]",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "#f-pattern",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Propose a custody schedule",
+          "as": "parent"
+        },
+        {
+          "action": "select",
+          "selector": "#f-child",
+          "value": "{{kid}}",
+          "as": "parent"
+        },
+        {
+          "action": "select",
+          "selector": "#f-pattern",
+          "value": "alternating_weeks",
+          "as": "parent"
+        },
+        {
+          "action": "fill",
+          "selector": "#f-anchor",
+          "value": "2026-03-02",
+          "as": "parent"
+        },
+        {
+          "action": "fill",
+          "selector": "#f-time",
+          "value": "17:00",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "#save-sch",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-retiresch]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Alternating weeks",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Countersigned",
+          "as": "parent"
+        },
+        {
+          "action": "expectNoText",
+          "text": "No schedules yet.",
+          "as": "parent"
+        },
+        {
+          "action": "reload",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": ".cal-grid",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": ".cal-cell.today",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Alternating weeks",
+          "as": "parent"
+        }
+      ]
+    },
+    {
+      "name": "a pending amendment is never presented as the schedule",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_amendments (id, household_a_id, household_b_id, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, rationale, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "am-pending",
+            "home-a",
+            "home-b",
+            "{{parent}}",
+            "{{kid}}",
+            "{{parent}}",
+            "{{kid}}",
+            "two_two_three",
+            "[\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"b\",\"b\",\"b\"]",
+            14,
+            "2026-04-06",
+            "18:30",
+            "America/Denver",
+            "moving closer to the school",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+          ]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_versions (id, household_a_id, household_b_id, household_a_agreed, household_b_agreed, status, updated_at, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, rationale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "am-pending",
+            "home-a",
+            "home-b",
+            1,
+            0,
+            "pending",
+            "2026-01-01T00:00:00Z",
+            "{{parent}}",
+            "{{kid}}",
+            "{{parent}}",
+            "{{kid}}",
+            "two_two_three",
+            "[\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"b\",\"b\",\"b\"]",
+            14,
+            "2026-04-06",
+            "18:30",
+            "America/Denver",
+            "moving closer to the school"
+          ]
+        },
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"setup\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Change proposed",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "moving closer to the school",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Waiting for your co-parent to countersign",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "No agreed schedule yet.",
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-retiresch]",
+          "count": 0,
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-editsch]",
+          "count": 0,
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-declinesch]",
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-signsch]",
+          "count": 0,
+          "as": "parent"
+        }
+      ]
+    },
+    {
+      "name": "an agreed version alone drives the schedule view",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_versions (id, household_a_id, household_b_id, household_a_agreed, household_b_agreed, status, agreed_at, updated_at, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, exchange_time, timezone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "v-agreed",
+            "home-a",
+            "home-b",
+            1,
+            1,
+            "agreed",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "{{parent}}",
+            "{{kid}}",
+            "{{parent}}",
+            "{{kid}}",
+            "two_two_three",
+            "[\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"a\",\"b\",\"b\",\"a\",\"a\",\"b\",\"b\",\"b\"]",
+            14,
+            "2026-03-02",
+            "17:00",
+            "America/Denver"
+          ]
+        },
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": ".cal-grid",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": ".cal-grid",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "2-2-3 rotation",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-newswap]",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"setup\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Countersigned",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "days counted in America/Denver",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-editsch]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-retiresch]",
+          "as": "parent"
+        },
+        {
+          "action": "expectNoText",
+          "text": "Change proposed",
+          "as": "parent"
+        }
+      ]
+    }
+  ]
+}

@@ -2,156 +2,532 @@
   "scenarios": [
     {
       "name": "messages are visible only to the two linked co-parents; direct writes are endpoint-only",
-      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
+      "members": {
+        "a": "adult",
+        "b": "adult",
+        "outsider": "adult"
+      },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": ["{{a}}", "{{b}}", "sess-ab", "2026-01-01T00:00:00Z"]
+          "params": [
+            "{{a}}",
+            "{{b}}",
+            "sess-ab",
+            "2026-01-01T00:00:00Z"
+          ]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": ["{{b}}", "{{a}}", "sess-ab", "2026-01-01T00:00:00Z"]
+          "params": [
+            "{{b}}",
+            "{{a}}",
+            "sess-ab",
+            "2026-01-01T00:00:00Z"
+          ]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-          "params": ["m1", "{{a}}", "{{b}}", "pickup at 5", "2026-01-01T00:00:00Z", "sess-ab"]
+          "params": [
+            "m1",
+            "{{a}}",
+            "{{b}}",
+            "pickup at 5",
+            "2026-01-01T00:00:00Z",
+            "sess-ab"
+          ]
         },
         {
           "action": "db",
           "as": "b",
           "sql": "SELECT id, body FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "m1" }] }
+          "expect": {
+            "status": 200,
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "id": "m1"
+              }
+            ]
+          }
         },
         {
           "action": "db",
           "as": "outsider",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowCount": 0 }
+          "expect": {
+            "status": 200,
+            "rowCount": 0
+          }
         },
         {
           "action": "db",
           "as": "a",
           "sql": "UPDATE app_co_parenting__messages SET body = 'edited' WHERE id = ?",
-          "params": ["m1"],
-          "expect": { "status": 403, "errorIncludes": "endpoint" }
+          "params": [
+            "m1"
+          ],
+          "expect": {
+            "status": 403,
+            "errorIncludes": "endpoint"
+          }
         }
       ]
     },
     {
       "name": "a replacement co-parent cannot read the previous pairing's record, and both original parents keep it",
-      "members": { "a": "adult", "b": "adult", "c": "adult" },
+      "members": {
+        "a": "adult",
+        "b": "adult",
+        "c": "adult"
+      },
       "steps": [
         {
           "comment": "A and B were paired under sess-ab and exchanged one message.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-          "params": ["m-ab", "{{a}}", "{{b}}", "pickup at 5", "2026-01-01T00:00:00Z", "sess-ab"]
+          "params": [
+            "m-ab",
+            "{{a}}",
+            "{{b}}",
+            "pickup at 5",
+            "2026-01-01T00:00:00Z",
+            "sess-ab"
+          ]
         },
         {
           "comment": "A NULL-session row. The current hub stamps every message, so this never occurs in practice — the read policy must not depend on the stamp anyway.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at) VALUES (?, ?, ?, ?, ?)",
-          "params": ["m-legacy", "{{b}}", "{{a}}", "swapping Thursday", "2025-06-01T00:00:00Z"]
+          "params": [
+            "m-legacy",
+            "{{b}}",
+            "{{a}}",
+            "swapping Thursday",
+            "2025-06-01T00:00:00Z"
+          ]
         },
         {
           "comment": "B has since re-paired with C. The partner endpoint clears the ex-partner's session, so A's row keeps B but loses sess-ab.",
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, NULL, ?)",
-          "params": ["{{a}}", "{{b}}", "2026-01-01T00:00:00Z"]
+          "params": [
+            "{{a}}",
+            "{{b}}",
+            "2026-01-01T00:00:00Z"
+          ]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": ["{{b}}", "{{c}}", "sess-bc", "2026-02-01T00:00:00Z"]
+          "params": [
+            "{{b}}",
+            "{{c}}",
+            "sess-bc",
+            "2026-02-01T00:00:00Z"
+          ]
         },
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, ?)",
-          "params": ["{{c}}", "{{b}}", "sess-bc", "2026-02-01T00:00:00Z"]
+          "params": [
+            "{{c}}",
+            "{{b}}",
+            "sess-bc",
+            "2026-02-01T00:00:00Z"
+          ]
         },
         {
           "comment": "The point of the phase: C is named in no A-B message, so C reads none of them — even though C's partner B is.",
           "action": "db",
           "as": "c",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowCount": 0 }
+          "expect": {
+            "status": 200,
+            "rowCount": 0
+          }
         },
         {
           "comment": "B keeps their own record even though B's active session is now sess-bc.",
           "action": "db",
           "as": "b",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowCount": 2, "rowsContain": [{ "id": "m-ab" }, { "id": "m-legacy" }] }
+          "expect": {
+            "status": 200,
+            "rowCount": 2,
+            "rowsContain": [
+              {
+                "id": "m-ab"
+              },
+              {
+                "id": "m-legacy"
+              }
+            ]
+          }
         },
         {
           "comment": "So does A, who has no active session at all.",
           "action": "db",
           "as": "a",
           "sql": "SELECT id FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowCount": 2, "rowsContain": [{ "id": "m-ab" }, { "id": "m-legacy" }] }
+          "expect": {
+            "status": 200,
+            "rowCount": 2,
+            "rowsContain": [
+              {
+                "id": "m-ab"
+              },
+              {
+                "id": "m-legacy"
+              }
+            ]
+          }
         },
         {
           "comment": "Counting is a read like any other — C cannot learn the record exists.",
           "action": "db",
           "as": "c",
           "sql": "SELECT COUNT(*) AS n FROM app_co_parenting__messages",
-          "expect": { "status": 200, "rowsContain": [{ "n": 0 }] }
+          "expect": {
+            "status": 200,
+            "rowsContain": [
+              {
+                "n": 0
+              }
+            ]
+          }
         }
       ]
     },
     {
       "name": "swap requests are visible only to the two parties",
-      "members": { "a": "adult", "b": "adult", "outsider": "adult" },
+      "members": {
+        "a": "adult",
+        "b": "adult",
+        "outsider": "adult"
+      },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-          "params": ["sw1", "{{a}}", "{{b}}", "child-1", "2026-02-01", "2026-02-03", "{{b}}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]
+          "params": [
+            "sw1",
+            "{{a}}",
+            "{{b}}",
+            "child-1",
+            "2026-02-01",
+            "2026-02-03",
+            "{{b}}",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+          ]
         },
         {
           "action": "db",
           "as": "b",
           "sql": "SELECT id FROM app_co_parenting__swap_requests",
-          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "sw1" }] }
+          "expect": {
+            "status": 200,
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "id": "sw1"
+              }
+            ]
+          }
         },
         {
           "action": "db",
           "as": "outsider",
           "sql": "SELECT id FROM app_co_parenting__swap_requests",
-          "expect": { "status": 200, "rowCount": 0 }
+          "expect": {
+            "status": 200,
+            "rowCount": 0
+          }
         }
       ]
     },
     {
       "name": "handoff notes are adult-read, endpoint-write; children cannot read them",
-      "members": { "adult": "adult", "kid": "child" },
+      "members": {
+        "adult": "adult",
+        "kid": "child"
+      },
       "steps": [
         {
           "action": "seedRaw",
           "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          "params": ["hn1", "child-1", "2026-02-01", "meds", "allergy meds at noon", "{{adult}}", "2026-01-01T00:00:00Z"]
+          "params": [
+            "hn1",
+            "child-1",
+            "2026-02-01",
+            "meds",
+            "allergy meds at noon",
+            "{{adult}}",
+            "2026-01-01T00:00:00Z"
+          ]
         },
         {
           "action": "db",
           "as": "adult",
           "sql": "SELECT id FROM app_co_parenting__handoff_notes",
-          "expect": { "status": 200, "rowCount": 1 }
+          "expect": {
+            "status": 200,
+            "rowCount": 1
+          }
         },
         {
           "action": "db",
           "as": "kid",
           "sql": "SELECT id FROM app_co_parenting__handoff_notes",
-          "expect": { "status": 403, "errorIncludes": "adult" }
+          "expect": {
+            "status": 403,
+            "errorIncludes": "adult"
+          }
         },
         {
           "action": "db",
           "as": "adult",
           "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          "params": ["hn2", "child-1", "2026-02-02", "school", "direct write", "{{adult}}", "2026-01-01T00:00:00Z"],
-          "expect": { "status": 403, "errorIncludes": "endpoint" }
+          "params": [
+            "hn2",
+            "child-1",
+            "2026-02-02",
+            "school",
+            "direct write",
+            "{{adult}}",
+            "2026-01-01T00:00:00Z"
+          ],
+          "expect": {
+            "status": 403,
+            "errorIncludes": "endpoint"
+          }
+        }
+      ]
+    },
+    {
+      "name": "the standing schedule is an agreement: every direct write lane into it is shut",
+      "members": {
+        "a": "adult",
+        "b": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_versions (id, household_a_id, household_b_id, household_a_agreed, household_b_agreed, status, agreed_at, updated_at, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, timezone) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "v1",
+            "home-a",
+            "home-b",
+            1,
+            1,
+            "agreed",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "{{kid}}",
+            "{{a}}",
+            "{{b}}",
+            "alternating_weeks",
+            "[\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"b\",\"b\",\"b\",\"b\",\"b\",\"b\",\"b\"]",
+            14,
+            "2026-03-02",
+            "America/Denver"
+          ]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, updated_at, source_version_id, materializer_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "d1",
+            "{{kid}}",
+            "2026-03-02",
+            "{{a}}",
+            0,
+            "cycle",
+            "Sam with A",
+            "2026-01-01T00:00:00Z",
+            "v1",
+            1
+          ]
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT id, pattern, anchor_date FROM app_co_parenting__schedule_versions WHERE status = 'agreed'",
+          "expect": {
+            "rowCount": 1
+          }
+        },
+        {
+          "action": "db",
+          "as": "kid",
+          "sql": "SELECT id FROM app_co_parenting__custody_days",
+          "expect": {
+            "rowCount": 1
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__schedule_versions SET anchor_date = '2099-01-01' WHERE id = 'v1'",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__schedule_versions (id, household_a_id, status, updated_at) VALUES ('forged', 'home-a', 'agreed', '2026-01-01T00:00:00Z')",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "DELETE FROM app_co_parenting__schedule_versions WHERE id = 'v1'",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__schedule_amendments (id, household_a_id, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, timezone, created_at, updated_at) VALUES ('forged','home-a','{{a}}','{{kid}}','{{a}}','{{b}}','custom','[\"a\"]',1,'2026-03-02','UTC','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__custody_days SET parent_id = '{{b}}' WHERE id = 'd1'",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "DELETE FROM app_co_parenting__custody_days",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__schedules (id, child_id, pattern, anchor_date, parent_a_id, parent_b_id, status, created_at, updated_at) VALUES ('legacy','{{kid}}','alternating_weeks','2026-03-02','{{a}}','{{b}}','active','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__overrides (id, child_id, start_date, end_date, parent_id, created_at) VALUES ('ov','{{kid}}','2026-03-02','2026-03-02','{{b}}','2026-01-01T00:00:00Z')",
+          "expect": {
+            "errorIncludes": "Hub endpoint"
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT anchor_date, status FROM app_co_parenting__schedule_versions WHERE id = 'v1'",
+          "expect": {
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "anchor_date": "2026-03-02",
+                "status": "agreed"
+              }
+            ]
+          }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT title, source FROM app_co_parenting__custody_days WHERE id = 'd1'",
+          "expect": {
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "title": "Sam with A"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a child sees where they are but not who is negotiating it",
+      "members": {
+        "a": "adult",
+        "b": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, updated_at, source_version_id, materializer_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "d1",
+            "{{kid}}",
+            "2026-03-02",
+            "{{a}}",
+            0,
+            "cycle",
+            "Sam with A",
+            "2026-01-01T00:00:00Z",
+            "v1",
+            1
+          ]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_amendments (id, household_a_id, household_b_id, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, timezone, rationale, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "params": [
+            "am1",
+            "home-a",
+            "home-b",
+            "{{a}}",
+            "{{kid}}",
+            "{{a}}",
+            "{{b}}",
+            "custom",
+            "[\"a\",\"b\"]",
+            2,
+            "2026-03-02",
+            "America/Denver",
+            "because of the move",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+          ]
+        },
+        {
+          "action": "db",
+          "as": "kid",
+          "sql": "SELECT day, title FROM app_co_parenting__custody_days",
+          "expect": {
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "title": "Sam with A"
+              }
+            ]
+          }
+        },
+        {
+          "action": "db",
+          "as": "kid",
+          "sql": "SELECT rationale FROM app_co_parenting__schedule_amendments",
+          "expect": {
+            "errorIncludes": "adult"
+          }
         }
       ]
     }

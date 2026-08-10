@@ -133,17 +133,18 @@
       sendHubNotification, hubAppUrl, searchMatch,
     } from "/hub-sdk.js";
     import {
-      effectiveForDate, normalizeCycle, buildCalendarEvents, addDays, validateSwap,
-      buildCustodyDays, nextTransition, upcomingTransitions, groupNotesByTransition,
+      effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
+      nextTransition, upcomingTransitions, groupNotesByTransition,
       notesForTransition, searchableFields, describeScheduleChange,
       soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
       pairingState, partitionMessagesBySession, counterpartOf,
+      compileCycle, mergeScheduleVersion, agreedVersion, openAmendment,
+      amendmentStance, canSignAmendment, scheduleNoticeAudience,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
     const CONTEXT       = window.__CONTEXT_URL       ?? "";
     const DB            = window.__DB_URL            ?? "";
-    const STORE         = window.__STORE_URL         ?? "";
     const APPEND_RECORD = window.__APPEND_RECORD_URL ?? "";
     const APP_ID        = window.__APP_ID            ?? "co-parenting";
     const P             = "app_co_parenting__";       // table prefix
@@ -177,6 +178,13 @@
     // tell those apart — message history certainly can't.
     let partnerProposalPending = false;
     let schedules = [], overrides = [], swaps = [], messages = [], handoffs = [];
+    // Every standing-schedule version this tenant has: agreed, pending,
+    // superseded, withdrawn, declined. `schedules` is the agreed subset.
+    let versions = [];
+    /** The tenant's zone, defaulted into a proposal so the parents SEE which
+     *  clock their custody days are counted in and can correct it before it
+     *  becomes an agreed term. Filled from the hub context at load. */
+    let spaceTimeZone = "UTC";
 let searchQ = "";       // in-app search (see logic.js searchableFields)
     let custodyDays = [];                        // materialized rotation (agenda/glance source)
     let view = "schedule";
@@ -205,8 +213,14 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         return;
       }
       try {
-        const res = await fetch(`${CONTEXT}?keys=family.members`);
-        members = ((await res.json())["family.members"]) ?? [];
+        const res = await fetch(`${CONTEXT}?keys=family.members,family.preferences`);
+        const ctx = await res.json();
+        members = ctx["family.members"] ?? [];
+        // The TENANT's zone, not this browser's. Custody-day boundaries are a
+        // term both parents agree to, so the default has to be the one they
+        // share — a proposer in another timezone must not silently define the
+        // handoff day from their own device clock.
+        spaceTimeZone = ctx["family.preferences"]?.timezone || spaceTimeZone;
       } catch { members = []; }
       memberMap = new Map(members.map(m => [m.id, m]));
     }
@@ -232,8 +246,26 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
     async function loadData() {
       if (DEMO) { seedDemo(); return; }
-      const sch = await db(`SELECT * FROM ${P}schedules WHERE status = 'active'`);
-      schedules = sch.rows;
+
+      // The standing schedule is an agreement, so it is read the way the swap
+      // agreements are: the mutable amendment row plus the hub-owned agreement
+      // state, merged by id. Both are governed tables, so a JOIN is rejected.
+      const [amd, ver] = await Promise.all([
+        db(`SELECT * FROM ${P}schedule_amendments ORDER BY created_at DESC`).catch(() => ({ rows: [] })),
+        db(`SELECT * FROM ${P}schedule_versions`).catch(() => ({ rows: [] })),
+      ]);
+      const verById = new Map(ver.rows.map(v => [v.id, v]));
+      versions = amd.rows.map(a => mergeScheduleVersion(a, verById.get(a.id)));
+      // An agreed version outlives its amendment row for retention purposes, so
+      // the list is not derived from the amendments alone.
+      const amendmentIds = new Set(amd.rows.map(a => a.id));
+      for (const v of ver.rows) {
+        if (!amendmentIds.has(v.id)) versions.push(mergeScheduleVersion({ id: v.id }, v));
+      }
+      // What the calendar and every other view treat as "the schedule" is
+      // exactly the set of versions currently in force. A pending proposal is
+      // never one of them — that is the whole point of countersigning.
+      schedules = versions.filter(v => v.status === "agreed");
 
       // swap_requests (party_scoped) and swap_agreements (endpoint_only) are both
       // governed tables — a JOIN across them is rejected — so load both and merge by id.
@@ -255,6 +287,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       // adult_writable, so either parent could unwind an agreed swap).
       overrides = lockedSwapOverrides(sa.rows);
 
+      // Read, never written: `custody_days` is endpoint_only and the hub's
+      // materializer is its only writer. Children may read it, which is what
+      // makes "where am I tonight" answerable to them.
+      custodyDays = (await db(`SELECT * FROM ${P}custody_days ORDER BY day`).catch(() => ({ rows: [] }))).rows;
+
       if (canManage()) {
         const [msg, hn] = await Promise.all([
           loadMessages(),
@@ -269,12 +306,21 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       // Anchor on the Monday of last week so "today" lands mid-rotation.
       const dow = new Date().getDay();               // 0=Sun
       const anchor = addDays(todayStr(), -(((dow + 6) % 7) + 7));
-      schedules = [{
+      // A demo version carries the CANONICAL cycle, exactly as a real agreed
+      // version does — the demo must not model a shape the product no longer has.
+      versions = [{
         id: "demo-sch", child_id: "demo-sam", pattern: "alternating_weeks",
-        cycle: null, cycle_length: null, anchor_date: anchor,
+        cycle: JSON.stringify(compileCycle("alternating_weeks")), cycle_length: 14, anchor_date: anchor,
         parent_a_id: "demo-dad", parent_b_id: "demo-mom", exchange_time: "17:00",
-        status: "active", created_by: "demo-dad", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+        timezone: "America/Denver", effective_from: null, effective_to: null,
+        status: "agreed", proposed_by: "demo-dad", household_a_agreed: 1, household_b_agreed: 1,
+        agreed_at: "2026-01-01T00:00:00Z", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
       }];
+      schedules = versions.filter(v => v.status === "agreed");
+      custodyDays = buildCustodyDays(schedules, [], {
+        startDate: todayStr(), endDate: addDays(todayStr(), 120),
+        childName: memberName, parentName: memberName,
+      });
       overrides = [];
       swaps = [{
         id: "demo-swap", requester_id: "demo-mom", responder_id: "demo-dad", child_id: "demo-sam",
@@ -292,72 +338,37 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       ];
     }
 
-    // ── Calendar export ──────────────────────────────────────────────────────
-    async function publishCalendar() {
-      if (!STORE) return;
-      if (me && !isAdult(me, members)) return; // store_acls write:adult — a non-adult would 403
-      const start = todayStr();
-      const events = buildCalendarEvents(schedules, overrides, {
-        startDate: start, endDate: addDays(start, 90),
-        childName: memberName, parentName: memberName,
-      });
-      fetch(STORE, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: "calendar_events", value: JSON.stringify(events) }),
-      }).catch(() => {});
-    }
+    // ── Derived surfaces are the hub's now ───────────────────────────────────
+    //
+    // Until 1.6.0 this app computed the rotation in the browser and wrote it
+    // into `custody_days` and the `calendar_events` store key. Both are gone,
+    // and neither is a refactor:
+    //
+    //   - a projection any adult could write was one either parent could
+    //     rewrite without touching what was agreed;
+    //   - three independent computations of one rotation (Today, the glance
+    //     tile, the calendar) could each be stale on their own;
+    //   - a tab closed between the DELETE and the INSERTs left the calendar
+    //     simply empty.
+    //
+    // The hub's `cycle_projection` materializer now writes both, from the agreed
+    // version, inside the same transaction that countersigns it. This app READS
+    // `custody_days` and holds no store write grant at all.
+    //
+    // The rotation engine in logic.js survives as the PREVIEW engine — it is
+    // what renders the days a proposal would produce, before there is anything
+    // agreed for the hub to project. The hub's own horizon (120 days, extended
+    // by its daily sweep) is what bounds the real projection.
 
-    // ── Materialized custody days (agenda / glance source) ───────────────────
-    // The hub runs the `agenda` and `glance` SELECTs itself and can't call the
-    // rotation engine, so the resolved days are written into custody_days.
-    // Regenerated wholesale — the rows are derived state with no independent
-    // truth, and a partial rebuild would leave stale days behind an edit.
-    const CUSTODY_HORIZON_DAYS = 120;
-
-    /**
-     * Recompute the projection into local state. Runs for everyone (children
-     * included) so the in-app "next handoff" line is correct even for members
-     * who can't write the table — only the persist step below is adult-gated.
-     */
-    function computeCustodyDays() {
-      const start = todayStr();
-      custodyDays = buildCustodyDays(schedules, overrides, {
-        startDate: start, endDate: addDays(start, CUSTODY_HORIZON_DAYS),
-        childName: memberName, parentName: memberName,
-      });
-      return custodyDays;
-    }
-
-    async function publishCustodyDays() {
-      const rows = computeCustodyDays();
+    /** Re-read the hub's projection after an agreement changes it. */
+    async function reloadCustodyDays() {
       if (!DB) return;
-      if (!canManage()) return;              // adult_writable — a child would 403
-      const start = todayStr();
-
-      const now = new Date().toISOString();
       try {
-        // Past days are left alone: retain_days prunes them, and keeping them
-        // means a mid-rotation glance still has yesterday's context.
-        await db(`DELETE FROM ${P}custody_days WHERE day >= ?`, [start]);
-        const COLS = "(id, child_id, day, parent_id, from_parent_id, is_transition, exchange_time, source, title, subtitle, updated_at)";
-        for (let i = 0; i < rows.length; i += 40) {
-          const chunk = rows.slice(i, i + 40);
-          const placeholders = chunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?)").join(",");
-          const params = chunk.flatMap(r => [
-            r.id, r.child_id, r.day, r.parent_id, r.from_parent_id,
-            r.is_transition, r.exchange_time, r.source, r.title, r.subtitle, now,
-          ]);
-          await db(`INSERT INTO ${P}custody_days ${COLS} VALUES ${placeholders}`, params);
-        }
+        custodyDays = (await db(`SELECT * FROM ${P}custody_days ORDER BY day`)).rows;
       } catch {
-        // Non-fatal: Today/glance go stale until the next edit, but the app,
-        // the calendar export, and the schedule view are all unaffected.
+        // Non-fatal: the schedule view and calendar grid render from the agreed
+        // version directly, so only the status card goes stale until reload.
       }
-    }
-
-    /** Rebuild both derived surfaces after any schedule/override change. */
-    async function republishDerived() {
-      await Promise.all([publishCalendar(), publishCustodyDays()]);
     }
 
     // ── Endpoints ────────────────────────────────────────────────────────────
@@ -445,9 +456,27 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       });
     }
 
+    /** Swap / handoff notices — addressed to the paired co-parent, which is who
+     *  those records are between. */
     function notifyPartner(title, body, params) {
       if (!partnerId) return;
       sendHubNotification({ title, body, audience: [partnerId], url: hubAppUrl(APP_ID, params) }).catch(() => {});
+    }
+
+    /**
+     * Standing-schedule notices — addressed from MEMBERSHIP, never from the
+     * pairing.
+     *
+     * The pairing is an in-app act that opens the message log; two co-parents
+     * can be full members of this space without having completed it. Routing a
+     * schedule amendment through it meant a proposal, a countersignature and a
+     * supersession could all happen with nobody told. Rule lives in logic.js
+     * (tested).
+     */
+    function notifySchedule(title, body, params) {
+      const audience = scheduleNoticeAudience(members, me?.id);
+      if (!audience.length) return;
+      sendHubNotification({ title, body, audience, url: hubAppUrl(APP_ID, params) }).catch(() => {});
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -462,9 +491,6 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     ];
 
     function render() {
-      computeCustodyDays();   // cheap (horizon × children) and keeps the status
-                              // card in step with edits that render before the
-                              // async persist in republishDerived() lands
       const tabsEl = document.getElementById("tabs");
       tabsEl.innerHTML = TABS.map(([id, label]) =>
         `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${esc(label)}</button>`
@@ -966,17 +992,56 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       // the private message log is never opened without a deliberate act.
       const checkedId = partnerId ?? suggested?.id ?? null;
 
-      const schedRows = schedules.length ? schedules.map(s => `
-        <div class="spread" style="padding:8px 0;border-top:1px solid var(--hub-border,#eee)">
-          <div>
-            <strong>${esc(memberName(s.child_id))}</strong>
-            <div class="muted">${esc(patternLabel(s))} · ${esc(memberName(s.parent_a_id))} / ${esc(memberName(s.parent_b_id))}</div>
+      // One row per child, showing the agreed version and — separately, never
+      // mixed in with it — any proposal awaiting a countersignature. A pending
+      // amendment must never read as though it were the schedule.
+      const scheduledChildIds = [...new Set([
+        ...schedules.map(s => s.child_id),
+        ...versions.filter(v => v.status === "pending" || v.status === "draft").map(v => v.child_id),
+      ])].filter(Boolean);
+
+      const schedRows = scheduledChildIds.length ? scheduledChildIds.map(cid => {
+        const agreed = agreedVersion(versions, cid);
+        const pending = openAmendment(versions, cid);
+        const signed = pending ? signedElsewhere.has(pending.id) : false;
+        const stance = pending ? amendmentStance(pending, me?.id, signed) : null;
+        const changed = pending && agreed ? describeScheduleChange(agreed, pending) : null;
+        return `
+        <div style="padding:8px 0;border-top:1px solid var(--hub-border,#eee)">
+          <div class="spread">
+            <div>
+              <strong>${esc(memberName(cid))}</strong>
+              ${agreed
+                ? `<div class="muted">${esc(patternLabel(agreed))} · ${esc(memberName(agreed.parent_a_id))} / ${esc(memberName(agreed.parent_b_id))}
+                     ${agreed.effective_to ? ` · ends ${esc(agreed.effective_to)}` : ""}</div>
+                   <div class="muted">Countersigned ${esc(fmtDateTime(agreed.agreed_at))} · days counted in ${esc(agreed.timezone ?? "UTC")}</div>`
+                : `<div class="muted">No agreed schedule yet.</div>`}
+            </div>
+            <div class="row">
+              ${pending ? "" : `<button class="btn btn-sm" data-editsch="${esc(cid)}">${agreed ? "Propose change" : "Propose schedule"}</button>`}
+              ${agreed && !pending ? `<button class="btn btn-sm btn-danger" data-retiresch="${esc(agreed.id)}">Propose ending it</button>` : ""}
+            </div>
           </div>
-          <div class="row">
-            <button class="btn btn-sm" data-editsch="${esc(s.id)}">Edit</button>
-            <button class="btn btn-sm btn-danger" data-delsch="${esc(s.id)}">Delete</button>
-          </div>
-        </div>`).join("") : `<p class="muted">No schedules yet.</p>`;
+          ${pending ? `
+            <div class="card" style="margin:8px 0 0">
+              <strong>⏳ Change proposed${pending.proposed_by ? ` by ${esc(memberName(pending.proposed_by))}` : ""}</strong>
+              <div class="muted">${changed ? `Changes ${esc(changed)}.` : "Sets the standing schedule."}
+                ${pending.rationale ? ` “${esc(pending.rationale)}”` : ""}</div>
+              <div class="muted">${esc(patternLabel(pending))} · from ${esc(pending.anchor_date ?? "?")}
+                ${pending.exchange_time ? ` · exchange ${esc(pending.exchange_time)}` : ""}
+                · days counted in ${esc(pending.timezone ?? "UTC")}</div>
+              <p class="muted" style="margin:6px 0 0">${stance === "awaiting_them"
+                ? "Waiting for your co-parent to countersign. The current schedule stays in force until they do."
+                : "This takes effect only once you countersign it."}</p>
+              <div class="row" style="margin-top:8px;gap:8px">
+                ${canSignAmendment(pending, me?.id, signed)
+                  ? `<button class="btn btn-primary btn-sm" data-signsch="${esc(pending.id)}">Countersign</button>` : ""}
+                <button class="btn btn-sm btn-danger" data-declinesch="${esc(pending.id)}">${
+                  pending.proposed_by === me?.id ? "Withdraw" : "Decline"}</button>
+              </div>
+            </div>` : ""}
+        </div>`;
+      }).join("") : `<p class="muted">No schedules yet.</p>`;
 
       el.innerHTML = `
         <div class="card">
@@ -994,6 +1059,8 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         <div class="card">
           <div class="spread"><h3 style="margin:0">Custody schedules</h3>
             <button class="btn btn-primary btn-sm" data-newsch>+ Add child</button></div>
+          <p class="hint" style="margin:4px 0 0">The standing schedule is an agreement: it changes only when
+            both parents countersign, and every version you have agreed to is kept.</p>
           ${schedRows}
         </div>`;
 
@@ -1001,9 +1068,13 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       el.querySelector("#unpair")?.addEventListener("click", unpair);
       el.querySelector("[data-newsch]")?.addEventListener("click", () => openScheduleModal(null));
       el.querySelectorAll("[data-editsch]").forEach(b =>
-        b.addEventListener("click", () => openScheduleModal(schedules.find(s => s.id === b.dataset.editsch))));
-      el.querySelectorAll("[data-delsch]").forEach(b =>
-        b.addEventListener("click", () => onDeleteSchedule(b.dataset.delsch)));
+        b.addEventListener("click", () => openScheduleModal(agreedVersion(versions, b.dataset.editsch))));
+      el.querySelectorAll("[data-retiresch]").forEach(b =>
+        b.addEventListener("click", () => onProposeRetirement(b.dataset.retiresch)));
+      el.querySelectorAll("[data-signsch]").forEach(b =>
+        b.addEventListener("click", () => onSignAmendment(b.dataset.signsch)));
+      el.querySelectorAll("[data-declinesch]").forEach(b =>
+        b.addEventListener("click", () => onDeclineAmendment(b.dataset.declinesch)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1029,13 +1100,22 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       return ids.map(id => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(memberName(id))}</option>`).join("");
     }
 
-    // Schedule create/edit
+    // Propose a standing-schedule amendment.
+    //
+    // `existing` is the currently AGREED version being amended (null for a
+    // child that has none yet). The form is pre-filled from it so the other
+    // parent is asked to countersign a specific difference rather than a fresh
+    // schedule they have to diff themselves.
     function openScheduleModal(existing) {
       const kids = members.filter(m => !isAdult(m, members));
       const adultIds = adults().map(a => a.id);
       const e = existing || {};
+      const zones = [...new Set([e.timezone, spaceTimeZone, "UTC"].filter(Boolean))];
       openModal(`
-        <h3>${existing ? "Edit" : "Add"} custody schedule</h3>
+        <h3>${existing ? "Propose a schedule change" : "Propose a custody schedule"}</h3>
+        <p class="hint">${existing
+          ? "The current schedule stays in force until your co-parent countersigns this."
+          : "This becomes the schedule once your co-parent countersigns it."}</p>
         <label class="field"><span>Child</span>
           <select id="f-child" ${existing ? "disabled" : ""}>
             ${kids.length ? kids.map(k => `<option value="${esc(k.id)}" ${k.id === e.child_id ? "selected" : ""}>${esc(k.name)}</option>`).join("")
@@ -1062,16 +1142,22 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         <p class="hint" id="f-anchor-hint">${esc(anchorHint(e.pattern ?? "alternating_weeks"))}</p>
         <label class="field"><span>Exchange time (optional)</span>
           <input type="time" id="f-time" value="${esc(e.exchange_time ?? "")}"></label>
+        <label class="field"><span>Custody days are counted in</span>
+          <select id="f-tz">${zones.map(z => `<option value="${esc(z)}" ${z === (e.timezone ?? spaceTimeZone) ? "selected" : ""}>${esc(z)}</option>`).join("")}</select></label>
+        <p class="hint">Whose midnight ends a custody day. Agreed as part of the schedule, so a
+          later settings change can't quietly move a handoff — only a new countersigned change can.</p>
+        <label class="field"><span>Reason for the change (optional)</span>
+          <textarea id="f-why" maxlength="500" placeholder="Why you're proposing this…"></textarea></label>
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
-          <button class="btn btn-primary" id="save-sch">${existing ? "Save" : "Create"}</button>
+          <button class="btn btn-primary" id="save-sch">Send for countersignature</button>
         </div>`);
       const patSel = modalEl.querySelector("#f-pattern");
       patSel.addEventListener("change", () => {
         modalEl.querySelector("#f-custom-wrap").style.display = patSel.value === "custom" ? "block" : "none";
         modalEl.querySelector("#f-anchor-hint").textContent = anchorHint(patSel.value);
       });
-      modalEl.querySelector("#save-sch").addEventListener("click", () => onSaveSchedule(existing));
+      modalEl.querySelector("#save-sch").addEventListener("click", () => onProposeAmendment(existing));
     }
 
     // Swap proposal
@@ -1212,74 +1298,213 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       }
     }
 
-    async function onSaveSchedule(existing) {
+    /**
+     * Propose a standing-schedule amendment.
+     *
+     * Two calls, deliberately, and in this order:
+     *
+     *   1. `/api/propose-agreement` writes the amendment row. The app cannot
+     *      write it directly — it is endpoint_only, and its party columns hold
+     *      the two participating HOUSEHOLD ids, which the hub resolves from the
+     *      live roster. That is what makes a supporting adult unable to propose
+     *      a custody change, and what keeps a demoted-and-refilled co-parent
+     *      seat a party to a proposal it did not personally make.
+     *   2. `/api/agree` records the proposer's own signature, which is also
+     *      what LOCKS the amendment when there is only one participating
+     *      household (a household install, or a space the other parent never
+     *      joined) — there is no second party to protect, so the same rule
+     *      governed operations use applies here.
+     *
+     * The pattern the parents picked is compiled to a canonical cycle array
+     * BEFORE it is sent, because that array is what gets countersigned and what
+     * the hub projects. See compileCycle in logic.js.
+     */
+    async function onProposeAmendment(existing) {
       const child_id = existing?.child_id ?? modalEl.querySelector("#f-child").value;
       const parent_a_id = modalEl.querySelector("#f-pa").value;
       const parent_b_id = modalEl.querySelector("#f-pb").value;
       const pattern = modalEl.querySelector("#f-pattern").value;
       const anchor_date = modalEl.querySelector("#f-anchor").value;
       const exchange_time = modalEl.querySelector("#f-time").value || null;
-      const cycleArr = pattern === "custom"
+      const timezone = modalEl.querySelector("#f-tz").value;
+      const rationale = modalEl.querySelector("#f-why").value.trim() || null;
+      const customArr = pattern === "custom"
         ? normalizeCycle(modalEl.querySelector("#f-cycle").value.split(",").map(s => s.trim().toLowerCase())) : [];
 
       if (!child_id) { hubAlert("Pick a child."); return; }
       if (parent_a_id === parent_b_id) { hubAlert("The two parents must be different people."); return; }
       if (!anchor_date) { hubAlert("Pick a cycle start date."); return; }
-      if (pattern === "custom" && !cycleArr.length) { hubAlert("Enter a custom cycle like a,a,b,b."); return; }
+      if (pattern === "custom" && !customArr.length) { hubAlert("Enter a custom cycle like a,a,b,b."); return; }
+
+      const cycleArr = compileCycle(pattern, customArr);
+      if (!cycleArr.length) { hubAlert("That pattern can't be worked out into a rotation."); return; }
+      const cycle = JSON.stringify(cycleArr);
+
+      const terms = {
+        child_id, parent_a_id, parent_b_id, pattern, cycle,
+        cycle_length: cycleArr.length, anchor_date, exchange_time, timezone,
+        effective_from: existing?.effective_from ?? null,
+        effective_to: existing?.effective_to ?? null,
+        rationale,
+        base_version_id: existing?.id ?? null,
+      };
+      // Nothing to countersign is not a proposal. Refused here rather than sent,
+      // so the other parent is never asked to sign an identical schedule.
+      if (existing && !describeScheduleChange(existing, terms)) {
+        hubAlert("Nothing has changed, so there is nothing to propose.");
+        return;
+      }
 
       const btn = modalEl.querySelector("#save-sch");
-      btn.disabled = true; btn.textContent = "Saving…";
-      const now = new Date().toISOString();
-      const cycle = pattern === "custom" ? JSON.stringify(cycleArr) : null;
-      const cycle_length = pattern === "custom" ? cycleArr.length : null;
+      btn.disabled = true; btn.textContent = "Sending…";
       try {
-        if (existing) {
-          // Worked out BEFORE the write, against the row as it was loaded.
-          const changed = describeScheduleChange(existing, {
-            pattern, cycle, anchor_date, parent_a_id, parent_b_id, exchange_time,
-          });
-          if (!DEMO) await db(`UPDATE ${P}schedules SET pattern=?, cycle=?, cycle_length=?, anchor_date=?, parent_a_id=?, parent_b_id=?, exchange_time=?, updated_at=? WHERE id=?`,
-            [pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, now, existing.id]);
-          const i = schedules.findIndex(s => s.id === existing.id);
-          if (i !== -1) schedules[i] = { ...schedules[i], pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, updated_at: now };
-          // Either parent may rewrite the rotation unilaterally; the other one
-          // finding out is what keeps that honest. Silent on a no-op save.
-          if (changed) {
-            notifyPartner("Schedule changed",
-              `${me?.name} changed ${changed} on ${memberName(child_id)}'s schedule.`,
-              { view: "schedule" });
-          }
-        } else {
-          const id = crypto.randomUUID();
-          if (!DEMO) await db(`INSERT INTO ${P}schedules (id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status, created_by, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
-            [id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, me?.id ?? null, now, now]);
-          schedules.push({ id, child_id, pattern, cycle, cycle_length, anchor_date, parent_a_id, parent_b_id, exchange_time, status: "active", created_by: me?.id, created_at: now, updated_at: now });
-          notifyPartner("Schedule created",
-            `${me?.name} set up a custody schedule for ${memberName(child_id)}.`,
-            { view: "schedule" });
-        }
+        const { id } = await requestJson(`/run/${APP_ID}/api/propose-agreement`, {
+          body: { table: "schedule_versions", values: terms },
+          fallbackError: "Could not record the proposal",
+        });
+        const result = await agreeSchedule(id, true);
         closeModal();
         currentChildId = child_id;
+        await loadData();
         render();
-        republishDerived();
+        notifySchedule(
+          result.locked ? "Custody schedule updated" : "Custody schedule change proposed",
+          result.locked
+            ? `${me?.name} set the standing schedule for ${memberName(child_id)}.`
+            : `${me?.name} proposed a change to ${memberName(child_id)}'s schedule. It takes effect when you countersign it.`,
+          { view: "setup" });
       } catch (e) {
-        btn.disabled = false; btn.textContent = existing ? "Save" : "Create";
+        btn.disabled = false; btn.textContent = "Send for countersignature";
         hubAlert(e.message);
       }
     }
 
-    async function onDeleteSchedule(id) {
-      const s = schedules.find(x => x.id === id);
-      if (!await hubConfirm({ message: `Delete ${memberName(s.child_id)}'s schedule?`, description: "Their custody days will be removed from the calendar.", destructive: true })) return;
+    /**
+     * Propose retiring a schedule.
+     *
+     * There is no delete. A standing schedule is a record both parents rely on,
+     * so ending one is an amendment like any other: the terms are unchanged
+     * except for an end date, and it takes effect only when the other parent
+     * countersigns. Every prior agreed version is kept regardless.
+     */
+    async function onProposeRetirement(versionId) {
+      const current = versions.find(v => v.id === versionId);
+      if (!current) return;
+      const until = todayStr();
+      const ok = await hubConfirm({
+        message: `Propose ending ${memberName(current.child_id)}'s schedule?`,
+        description: "It stays in force until your co-parent countersigns. Custody days after "
+          + `${until} stop being published; everything already agreed is kept.`,
+        destructive: true,
+      });
+      if (!ok) return;
       try {
-        if (!DEMO) await db(`UPDATE ${P}schedules SET status='archived', updated_at=? WHERE id=?`, [new Date().toISOString(), id]);
-        schedules = schedules.filter(x => x.id !== id);
+        const { id } = await requestJson(`/run/${APP_ID}/api/propose-agreement`, {
+          body: {
+            table: "schedule_versions",
+            values: {
+              child_id: current.child_id,
+              parent_a_id: current.parent_a_id,
+              parent_b_id: current.parent_b_id,
+              pattern: current.pattern,
+              cycle: current.cycle,
+              cycle_length: current.cycle_length,
+              anchor_date: current.anchor_date,
+              exchange_time: current.exchange_time ?? null,
+              timezone: current.timezone ?? spaceTimeZone,
+              effective_from: current.effective_from ?? null,
+              effective_to: until,
+              rationale: "Ending this schedule.",
+              base_version_id: current.id,
+            },
+          },
+          fallbackError: "Could not propose the change",
+        });
+        const result = await agreeSchedule(id, true);
+        await loadData();
         render();
-        republishDerived();
-        notifyPartner("Schedule removed",
-          `${me?.name} removed ${memberName(s.child_id)}'s custody schedule.`,
-          { view: "schedule" });
+        notifySchedule(
+          result.locked ? "Custody schedule ended" : "End of custody schedule proposed",
+          result.locked
+            ? `${me?.name} ended ${memberName(current.child_id)}'s standing schedule.`
+            : `${me?.name} proposed ending ${memberName(current.child_id)}'s schedule. It stays in force until you countersign.`,
+          { view: "setup" });
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    /** Countersign, decline, or withdraw a standing-schedule amendment. */
+    function agreeSchedule(id, agreed, resolution) {
+      return requestJson(`/run/${APP_ID}/api/agree`, {
+        body: {
+          table: "schedule_versions", id, agreed,
+          ...(resolution ? { resolution } : {}),
+        },
+        fallbackError: "Could not record your decision",
+      });
+    }
+
+    /**
+     * Amendment ids the hub has told us this side had already signed.
+     *
+     * The app infers which side it is from who proposed, which is exact except
+     * for a co-parent seat replaced while a proposal is open. `/api/agree`
+     * answers that authoritatively — it resolves the caller's household live —
+     * so one countersign attempt corrects the view for the rest of the session.
+     */
+    const signedElsewhere = new Set();
+
+    async function onSignAmendment(id) {
+      const amendment = versions.find(v => v.id === id);
+      if (!amendment) return;
+      try {
+        const result = await agreeSchedule(id, true);
+        if (result.already_agreed) {
+          signedElsewhere.add(id);
+          await loadData();
+          render();
+          hubAlert("You've already countersigned this change. It takes effect once your co-parent does too.");
+          return;
+        }
+        // The projection is written in the same transaction as the lock, so a
+        // successful countersignature means the calendar is already correct.
+        await loadData();
+        render();
+        if (result.locked) {
+          notifySchedule("Custody schedule agreed",
+            `${me?.name} countersigned the change to ${memberName(amendment.child_id)}'s schedule. It's now in force.`,
+            { view: "schedule" });
+        }
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    async function onDeclineAmendment(id) {
+      const amendment = versions.find(v => v.id === id);
+      if (!amendment) return;
+      const mine = amendment.proposed_by === me?.id;
+      const ok = await hubConfirm({
+        message: mine ? "Withdraw your proposed change?" : "Decline this proposed change?",
+        description: "The schedule currently in force is unaffected.",
+        destructive: true,
+      });
+      if (!ok) return;
+      try {
+        // `resolution: true` asks the hub to resolve this the way OUR side
+        // resolves, rather than naming "withdrawn" or "declined" ourselves. The
+        // app can only guess which of those applies, and the hub rejects a
+        // resolution belonging to the other party — so a replaced co-parent
+        // seat would have its decline refused for naming the wrong word. The
+        // hub returns the value it used, which is also the honest source for
+        // the wording below.
+        const result = await agreeSchedule(id, false, true);
+        const withdrew = result.status === "withdrawn";
+        await loadData();
+        render();
+        notifySchedule(
+          withdrew ? "Schedule change withdrawn" : "Schedule change declined",
+          withdrew
+            ? `${me?.name} withdrew their proposed change to ${memberName(amendment.child_id)}'s schedule.`
+            : `${me?.name} declined the proposed change to ${memberName(amendment.child_id)}'s schedule.`,
+          { view: "setup" });
       } catch (e) { hubAlert(e.message); }
     }
 
@@ -1347,8 +1572,12 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         Object.assign(s, result.snapshot);
         s.status = "locked"; s.locked_at = new Date().toISOString();
         overrides = lockedSwapOverrides(swaps);
+        // Locking a swap re-projects the affected child in the SAME hub
+        // transaction (the swap agreements table is this app's declared
+        // `cycle_projection.exceptions` source), so the days are already right
+        // on the server — this is a read, not a rebuild.
+        await reloadCustodyDays();
         render();
-        republishDerived();
         notifyPartner("Swap confirmed", `${me?.name} agreed to the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
       } catch (e) { hubAlert(e.message); }
     }
@@ -1482,7 +1711,6 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       await loadData();
       handleDeepLink();
       render();
-      republishDerived();
       // A deep link can land straight on the thread (notifications point here).
       if (view === "messages") refreshMessages();
     })();

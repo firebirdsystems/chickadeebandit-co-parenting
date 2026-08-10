@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
+  compileCycle,
+  mergeScheduleVersion,
+  agreedVersion,
+  openAmendment,
+  amendmentStance,
+  canSignAmendment,
+  scheduleNoticeAudience,
   toDayNumber,
   fromDayNumber,
   daysBetween,
@@ -841,5 +848,202 @@ describe("partitionMessagesBySession", () => {
       [msg({ id: "in", author_id: "ex", recipient_id: PA, session_id: "s1" })], PA, "s2",
     );
     expect(earlier[0].counterpartId).toBe("ex");
+  });
+});
+
+
+// ── Standing schedules as countersigned agreements (1.6.0) ──────────────────
+
+describe("compileCycle", () => {
+  it("compiles every named pattern to a day-by-day party array", () => {
+    expect(compileCycle("alternating_weeks")).toEqual(
+      [..."aaaaaaa", ..."bbbbbbb"].map(c => c),
+    );
+    expect(compileCycle("two_two_three")).toHaveLength(14);
+    expect(compileCycle("alternating_weekends")).toHaveLength(14);
+  });
+
+  it("passes a custom cycle through normalization", () => {
+    expect(compileCycle("custom", "a,b,x")).toEqual([]);
+    expect(compileCycle("custom", ["a", "b", "b"])).toEqual(["a", "b", "b"]);
+  });
+
+  it("returns nothing for a pattern it cannot compile", () => {
+    // The caller treats [] as "cannot propose" — an agreement whose day-by-day
+    // rule the hub could not read would be a promise the server cannot keep.
+    expect(compileCycle("something_new")).toEqual([]);
+    expect(compileCycle("custom", "")).toEqual([]);
+  });
+});
+
+describe("custodyKeyForDate with a compiled cycle", () => {
+  it("prefers the frozen cycle over the pattern name", () => {
+    // Same array the hub materializer projects, so the in-app grid and the
+    // server's custody days cannot disagree about a day.
+    const version = {
+      pattern: "alternating_weeks",
+      cycle: JSON.stringify(["b", "b", "a"]),
+      anchor_date: "2026-03-02",
+      parent_a_id: "mom", parent_b_id: "dad", child_id: "kid",
+    };
+    expect(custodyKeyForDate(version, "2026-03-02")).toBe("b");
+    expect(custodyKeyForDate(version, "2026-03-04")).toBe("a");
+    // And still resolves correctly before the anchor.
+    expect(custodyKeyForDate(version, "2026-03-01")).toBe("a");
+  });
+});
+
+describe("mergeScheduleVersion", () => {
+  const amendment = {
+    id: "v2", child_id: "kid", pattern: "custom", cycle: '["a","b"]',
+    anchor_date: "2026-03-02", proposed_by: "mom", created_at: "2026-02-01T00:00:00Z",
+  };
+
+  it("is a draft until the hub has an agreement row for it", () => {
+    const merged = mergeScheduleVersion(amendment, undefined);
+    expect(merged.status).toBe("draft");
+    expect(merged.household_a_agreed).toBe(0);
+  });
+
+  it("takes every term from the frozen snapshot once one is bound", () => {
+    // What the second parent reads must be exactly what they would sign, so a
+    // post-proposal edit to the amendment row can never reach the display.
+    const merged = mergeScheduleVersion(
+      { ...amendment, anchor_date: "2099-01-01", pattern: "alternating_weeks" },
+      {
+        id: "v2", status: "pending", household_a_agreed: 1, household_b_agreed: 0,
+        child_id: "kid", pattern: "custom", cycle: '["a","b"]', anchor_date: "2026-03-02",
+        timezone: "America/Denver", base_version_id: "v1", proposed_by: "mom",
+      },
+    );
+    expect(merged.anchor_date).toBe("2026-03-02");
+    expect(merged.pattern).toBe("custom");
+    expect(merged.base_version_id).toBe("v1");
+    expect(merged.household_a_agreed).toBe(1);
+  });
+
+  it("survives the loss of its amendment row", () => {
+    const merged = mergeScheduleVersion({ id: "v1" }, {
+      id: "v1", status: "agreed", child_id: "kid", cycle: '["a"]',
+      anchor_date: "2026-01-01", agreed_at: "2026-01-02T00:00:00Z",
+      household_a_agreed: 1, household_b_agreed: 1,
+    });
+    expect(merged.status).toBe("agreed");
+    expect(merged.agreed_at).toBe("2026-01-02T00:00:00Z");
+  });
+});
+
+describe("version selection", () => {
+  const versions = [
+    { id: "v0", child_id: "kid", status: "superseded" },
+    { id: "v1", child_id: "kid", status: "agreed" },
+    { id: "v2", child_id: "kid", status: "pending", created_at: "2026-02-01T00:00:00Z" },
+    { id: "v3", child_id: "other", status: "agreed" },
+    { id: "v4", child_id: "kid", status: "declined" },
+  ];
+
+  it("finds the version in force, per child", () => {
+    expect(agreedVersion(versions, "kid").id).toBe("v1");
+    expect(agreedVersion(versions, "nobody")).toBeNull();
+  });
+
+  it("finds the open proposal and ignores resolved ones", () => {
+    expect(openAmendment(versions, "kid").id).toBe("v2");
+    expect(openAmendment(versions, "other")).toBeNull();
+  });
+
+  it("prefers the newest of two open proposals", () => {
+    const two = [
+      { id: "old", child_id: "kid", status: "pending", created_at: "2026-01-01T00:00:00Z" },
+      { id: "new", child_id: "kid", status: "pending", created_at: "2026-03-01T00:00:00Z" },
+    ];
+    expect(openAmendment(two, "kid").id).toBe("new");
+  });
+});
+
+describe("amendmentStance", () => {
+  const proposal = (over = {}) => ({
+    id: "v2", status: "pending", proposed_by: "mom",
+    household_a_agreed: 1, household_b_agreed: 0, ...over,
+  });
+
+  it("tells the proposer they are waiting on the other parent", () => {
+    expect(amendmentStance(proposal(), "mom")).toBe("awaiting_them");
+    expect(canSignAmendment(proposal(), "mom")).toBe(false);
+  });
+
+  it("tells the other parent it is their signature that is missing", () => {
+    expect(amendmentStance(proposal(), "dad")).toBe("awaiting_you");
+    expect(canSignAmendment(proposal(), "dad")).toBe(true);
+  });
+
+  it("lets a proposer whose own bootstrap signature failed retry it", () => {
+    // The propose and the signature are two calls; the second can fail on its
+    // own, and the proposal would otherwise be unsignable by anyone.
+    const stalled = proposal({ household_a_agreed: 0 });
+    expect(amendmentStance(stalled, "mom")).toBe("awaiting_you");
+    expect(canSignAmendment(stalled, "mom")).toBe(true);
+  });
+
+  it("refuses to sign anything already resolved", () => {
+    expect(canSignAmendment(proposal({ status: "agreed" }), "dad")).toBe(false);
+    expect(canSignAmendment(proposal({ status: "declined" }), "dad")).toBe(false);
+    expect(canSignAmendment(null, "dad")).toBe(false);
+  });
+
+  it("takes the hub's word over its own guess about which side signed", () => {
+    // A co-parent seat replaced while a proposal is open: the new steward did
+    // not propose it, so the guess puts them on the wrong side and offers a
+    // countersign button that changes nothing however often it is pressed.
+    // `already_agreed` from /api/agree is the correction.
+    expect(amendmentStance(proposal(), "newsteward")).toBe("awaiting_you");
+    expect(amendmentStance(proposal(), "newsteward", true)).toBe("awaiting_them");
+    expect(canSignAmendment(proposal(), "newsteward", true)).toBe(false);
+  });
+
+  it("never lets the correction hand out authority the guess withheld", () => {
+    // The override only ever moves toward "signed". Nothing about the hub
+    // reporting a prior signature should turn a read-only view into a signable
+    // one, so `false` leaves the ordinary derivation exactly as it was.
+    expect(canSignAmendment(proposal(), "dad", false)).toBe(true);
+    expect(canSignAmendment(proposal({ status: "agreed" }), "dad", true)).toBe(false);
+  });
+});
+
+
+describe("scheduleNoticeAudience", () => {
+  const coParentA = { id: "a", role: "adult", isAdmin: true, hasLogin: true };
+  const coParentB = { id: "b", role: "adult", isAdmin: true, hasLogin: true };
+  const stepParent = { id: "step", role: "adult", isAdmin: false, hasLogin: true };
+  const child = { id: "kid", role: "child", isAdmin: false, hasLogin: false };
+
+  it("addresses the other co-parent, not the pairing", () => {
+    // The bug this replaces: notifications went to the app's partner_config
+    // row, so two co-parents who never completed the in-app pairing step could
+    // have a schedule proposed, countersigned and superseded in silence.
+    expect(scheduleNoticeAudience([coParentA, coParentB, child], "a")).toEqual(["b"]);
+  });
+
+  it("does not notify a child", () => {
+    expect(scheduleNoticeAudience([coParentA, child], "a")).toEqual([]);
+  });
+
+  it("prefers the co-parents over a supporting adult", () => {
+    // A step-parent may READ the schedule; they are not a party to changing it,
+    // so they are not who a countersignature request is addressed to.
+    expect(scheduleNoticeAudience([coParentA, coParentB, stepParent], "a")).toEqual(["b"]);
+  });
+
+  it("falls back to every other adult rather than going silent", () => {
+    // Fails OPEN, deliberately and unlike an access decision: the recipient can
+    // already read the schedule, so the only cost of over-delivery is a
+    // notification, while under-delivery is the silence being fixed.
+    expect(scheduleNoticeAudience([coParentA, stepParent], "a")).toEqual(["step"]);
+  });
+
+  it("returns nobody when the proposer is alone", () => {
+    expect(scheduleNoticeAudience([coParentA], "a")).toEqual([]);
+    expect(scheduleNoticeAudience([], "a")).toEqual([]);
+    expect(scheduleNoticeAudience(null, "a")).toEqual([]);
   });
 });
