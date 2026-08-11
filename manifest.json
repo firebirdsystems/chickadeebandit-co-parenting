@@ -1,8 +1,8 @@
 {
   "id": "co-parenting",
   "name": "Co-Parenting",
-  "version": "1.6.0",
-  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle) that BOTH parents countersign before they take effect, countersigned one-off swaps whose terms are frozen server-side at approval, a tamper-evident message log, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
+  "version": "1.6.1",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, or your own cycle) that BOTH parents countersign before they take effect, countersigned one-off swaps whose terms are frozen server-side at approval, a message log that cannot be edited or deleted after sending, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -78,7 +78,7 @@
     },
     "schedule_versions": {
       "kind": "endpoint_only",
-      "read": "everyone",
+      "read": "adult",
       "audit_writes": true
     },
     "custody_days": {
