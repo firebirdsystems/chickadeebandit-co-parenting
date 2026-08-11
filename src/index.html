@@ -514,6 +514,12 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     // ── Schedule view ────────────────────────────────────────────────────────
     function renderSchedule(el) {
       if (!schedules.length) {
+        // A child reads the materialized projection but not the agreement that
+        // produced it: `schedule_versions` is adult-read, because its `rationale`
+        // is one parent's written argument for changing custody. So when there is
+        // no readable version but there ARE projected days, draw the calendar from
+        // `custody_days` — the same rows the hub's Today and glance surfaces use.
+        if (custodyDays.length) { renderProjectedSchedule(el); return; }
         el.innerHTML = `<div class="empty">No custody schedule yet.<br><br>
           ${canManage() ? `<button class="btn btn-primary" data-goto="setup">Set up a schedule</button>` : `Ask a parent to set one up.`}</div>`;
         el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
@@ -588,6 +594,90 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           calMonth = { y, m }; render();
         }));
       el.querySelector("[data-newswap]")?.addEventListener("click", () => openSwapModal(sch.child_id));
+    }
+
+    /**
+     * The schedule view for someone who can read the projection but not the
+     * agreement — today, a child.
+     *
+     * Deliberately NOT a degraded copy of the adult view: it draws only days the
+     * hub actually materialized, so it stops at the projection horizon instead of
+     * computing a rotation client-side. A child asking "where am I on a Tuesday
+     * in 2029" gets no answer rather than one the parents never countersigned.
+     */
+    function renderProjectedSchedule(el) {
+      const kids = [...new Set(custodyDays.map(r => r.child_id))].filter(Boolean);
+      if (!currentChildId || !kids.includes(currentChildId)) currentChildId = kids[0];
+      if (!calMonth) { const d = new Date(); calMonth = { y: d.getFullYear(), m: d.getMonth() }; }
+
+      const mine = custodyDays.filter(r => r.child_id === currentChildId);
+      const byDay = new Map(mine.map(r => [r.day, r]));
+      // Colour by whoever actually appears in the projection; there is no
+      // parent_a/parent_b to read without the agreement row.
+      const parents = [...new Set(mine.map(r => r.parent_id))].filter(Boolean);
+      const colorFor = id => memberColor(id, members);
+
+      const pills = kids.map(cid =>
+        `<button class="pill ${cid === currentChildId ? "active" : ""}" data-child="${esc(cid)}">${esc(memberName(cid))}</button>`
+      ).join("");
+      const monthName = new Date(calMonth.y, calMonth.m, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
+      const todayRow = byDay.get(todayStr());
+      const upcoming = nextTransition(custodyDays, addDays(todayStr(), 1), currentChildId);
+
+      el.innerHTML = `
+        <div class="pills">${pills}</div>
+        ${todayRow ? `
+          <div class="card">
+            <div class="spread">
+              <div>
+                <strong>${esc(todayRow.title)}</strong>
+                <div class="muted">${esc(todayRow.subtitle ?? "")}</div>
+              </div>
+              ${upcoming ? `<div class="muted" style="text-align:right">Next handoff<br><strong>${esc(fmtHandoffDay(upcoming.day))}</strong></div>` : ""}
+            </div>
+          </div>` : ""}
+        <div class="card">
+          <div class="cal-head">
+            <button class="btn btn-sm" data-nav="-1">‹</button>
+            <strong>${esc(monthName)}</strong>
+            <button class="btn btn-sm" data-nav="1">›</button>
+          </div>
+          <div class="cal-grid">
+            ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d => `<div class="cal-dow">${d}</div>`).join("")}
+            ${renderProjectedCells(byDay, colorFor)}
+          </div>
+          <div class="legend">
+            ${parents.map(id => `<span><span class="sw" style="background:${colorFor(id)}"></span>${esc(memberName(id))}</span>`).join("")}
+          </div>
+        </div>`;
+
+      el.querySelectorAll("[data-child]").forEach(b =>
+        b.addEventListener("click", () => { currentChildId = b.dataset.child; render(); }));
+      el.querySelectorAll("[data-nav]").forEach(b =>
+        b.addEventListener("click", () => {
+          let m = calMonth.m + parseInt(b.dataset.nav, 10), y = calMonth.y;
+          if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
+          calMonth = { y, m }; render();
+        }));
+    }
+
+    function renderProjectedCells(byDay, colorFor) {
+      const first = new Date(calMonth.y, calMonth.m, 1);
+      const daysInMonth = new Date(calMonth.y, calMonth.m + 1, 0).getDate();
+      let cells = "";
+      for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty-cell"></div>`;
+      for (let d = 1; d <= daysInMonth; d++) {
+        const date = `${calMonth.y}-${String(calMonth.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        const row = byDay.get(date);
+        const bg = row ? colorFor(row.parent_id) : "transparent";
+        const tint = bg === "transparent" ? "" : `background:${bg}22`;
+        cells += `<div class="cal-cell ${date === todayStr() ? "today" : ""}" style="${tint}" title="${row ? esc(memberName(row.parent_id)) : ""}">
+          ${row?.source === "override" ? `<span class="ov-dot"></span>` : ""}
+          <span class="dnum">${d}</span>
+          <span class="who" style="color:${bg === "transparent" ? "inherit" : bg}">${row ? esc(initial(memberName(row.parent_id))) : ""}</span>
+        </div>`;
+      }
+      return cells;
     }
 
     function renderMonthCells(sch, colA, colB) {

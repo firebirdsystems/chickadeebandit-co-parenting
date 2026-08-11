@@ -50,6 +50,25 @@ describe("manifest.json", () => {
     });
   });
 
+  // A ratchet, not a preference. `schedule_versions.rationale` is one parent's
+  // written argument for changing custody — the single most sensitive field in
+  // the table — and `read: "everyone"` put it in front of every child in the
+  // space and every future professional guest. The projection children actually
+  // need is `custody_days`, which stays readable to them.
+  it("keeps the agreed-schedule terms adult-read and the projection member-read", () => {
+    expect(manifest.row_policies.schedule_versions.read).toBe("adult");
+    expect(manifest.row_policies.schedule_amendments.read).toBe("adult");
+    expect(manifest.row_policies.custody_days.read).toBe("everyone");
+  });
+
+  // The adult view bails out when `schedules` is empty, so tightening the read
+  // above would have left a child with a blank app if nothing rendered the
+  // projection instead.
+  it("falls back to the custody_days projection when no version is readable", () => {
+    expect(entrypoint).toMatch(/if \(custodyDays\.length\) \{ renderProjectedSchedule\(el\); return; \}/);
+    expect(entrypoint).toMatch(/function renderProjectedSchedule\(el\)/);
+  });
+
   it("imports every Phase 4 pairing helper used by the browser entrypoint", () => {
     const logicImport = entrypoint.match(/import\s*\{([\s\S]*?)\}\s*from\s*["']\.\/logic\.js["']/)?.[1] ?? "";
     expect(logicImport).toMatch(/\bpairingState\b/);
