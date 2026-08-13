@@ -25,6 +25,7 @@ import {
   upcomingTransitions,
   groupNotesByTransition,
   notesForTransition, searchableFields, describeScheduleChange,
+  draftProposalTerms, draftSendBlocker,
   soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
   pairingState, partitionMessagesBySession,
 } from "../src/logic.js";
@@ -452,6 +453,123 @@ describe("soleCoParentCandidate", () => {
     expect(soleCoParentCandidate([adult("me")], "me")).toBeNull();
     expect(soleCoParentCandidate([adult("me"), adult("them")], undefined)).toBeNull();
     expect(soleCoParentCandidate(undefined, "me")).toBeNull();
+  });
+});
+
+describe("private schedule drafts", () => {
+  // A draft carries the same fields a proposal does, minus everything about a
+  // second party — it has none until it is sent.
+  const draft = (over = {}) => ({
+    id: "draft-1",
+    author_id: PA,
+    child_id: "kid-1",
+    parent_a_id: PA,
+    parent_b_id: PB,
+    pattern: "alternating_weeks",
+    cycle: JSON.stringify(compileCycle("alternating_weeks")),
+    cycle_length: 14,
+    anchor_date: "2026-01-05",
+    exchange_time: "17:00",
+    timezone: "America/Denver",
+    rationale: null,
+    base_version_id: null,
+    ...over,
+  });
+
+  describe("draftProposalTerms", () => {
+    it("produces exactly the shape /api/propose-agreement takes", () => {
+      expect(draftProposalTerms(draft(), "UTC")).toEqual({
+        child_id: "kid-1",
+        parent_a_id: PA,
+        parent_b_id: PB,
+        pattern: "alternating_weeks",
+        cycle: JSON.stringify(compileCycle("alternating_weeks")),
+        cycle_length: 14,
+        anchor_date: "2026-01-05",
+        exchange_time: "17:00",
+        timezone: "America/Denver",
+        effective_from: null,
+        effective_to: null,
+        rationale: null,
+        base_version_id: null,
+      });
+    });
+
+    it("falls back to the space timezone, so a draft never proposes a null zone", () => {
+      expect(draftProposalTerms(draft({ timezone: null }), "America/Chicago").timezone)
+        .toBe("America/Chicago");
+    });
+
+    it("refuses a half-finished draft instead of proposing the gaps", () => {
+      // Saving an incomplete draft is the POINT of a draft. Turning one into a
+      // proposal is what must not happen by accident.
+      expect(draftProposalTerms(draft({ anchor_date: null }), "UTC")).toBeNull();
+      expect(draftProposalTerms(draft({ pattern: null }), "UTC")).toBeNull();
+      expect(draftProposalTerms(draft({ cycle: "[]", cycle_length: 0 }), "UTC")).toBeNull();
+      expect(draftProposalTerms(draft({ timezone: null }), null)).toBeNull();
+    });
+
+    it("refuses a draft naming one person as both parents", () => {
+      expect(draftProposalTerms(draft({ parent_b_id: PA }), "UTC")).toBeNull();
+    });
+
+    it("carries the COMPILED cycle, not the pattern name", () => {
+      // What gets countersigned is the day-by-day array. If a draft stored only
+      // the pattern name, a later release redefining that pattern would change
+      // what a saved draft proposes, silently.
+      const terms = draftProposalTerms(draft({ pattern: "two_two_three",
+        cycle: JSON.stringify(compileCycle("two_two_three")) }), "UTC");
+      expect(JSON.parse(terms.cycle)).toEqual(compileCycle("two_two_three"));
+      expect(terms.cycle_length).toBe(compileCycle("two_two_three").length);
+    });
+  });
+
+  describe("draftSendBlocker", () => {
+    it("lets a complete first-schedule draft through", () => {
+      expect(draftSendBlocker(draft(), null, "UTC")).toBeNull();
+    });
+
+    it("blocks a half-finished draft with something a person can act on", () => {
+      expect(draftSendBlocker(draft({ anchor_date: null }), null, "UTC"))
+        .toMatch(/missing something/i);
+    });
+
+    it("blocks a draft that would silently revert the other parent's change", () => {
+      // Written against nothing; a version has since been countersigned. Sending
+      // as-is proposes undoing it while looking like an ordinary edit.
+      const agreed = schedule({ id: "ver-2", status: "agreed" });
+      expect(draftSendBlocker(draft({ base_version_id: null }), agreed, "UTC"))
+        .toMatch(/changed after you started/i);
+    });
+
+    it("blocks a draft whose base version is no longer the one in force", () => {
+      const agreed = schedule({ id: "ver-3", status: "agreed" });
+      expect(draftSendBlocker(draft({ base_version_id: "ver-1" }), agreed, "UTC"))
+        .toMatch(/changed after you started/i);
+    });
+
+    it("lets a draft through once it is based on what is actually in force", () => {
+      const agreed = schedule({ id: "ver-3", status: "agreed", pattern: "two_two_three" });
+      expect(draftSendBlocker(
+        draft({ base_version_id: "ver-3" }), agreed, "UTC",
+      )).toBeNull();
+    });
+
+    it("refuses a draft identical to the schedule already in force", () => {
+      // The other parent must never be asked to countersign a change that
+      // changes nothing.
+      const agreed = schedule({
+        id: "ver-3", status: "agreed",
+        cycle: JSON.stringify(compileCycle("alternating_weeks")), cycle_length: 14,
+        exchange_time: "17:00", timezone: "America/Denver",
+      });
+      expect(draftSendBlocker(draft({ base_version_id: "ver-3" }), agreed, "UTC"))
+        .toMatch(/nothing to propose/i);
+    });
+
+    it("says so plainly when there is no draft at all", () => {
+      expect(draftSendBlocker(null, null, "UTC")).toBeTruthy();
+    });
   });
 });
 

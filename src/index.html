@@ -140,6 +140,7 @@
       pairingState, partitionMessagesBySession, counterpartOf,
       compileCycle, mergeScheduleVersion, agreedVersion, openAmendment,
       amendmentStance, canSignAmendment, scheduleNoticeAudience,
+      draftProposalTerms, draftSendBlocker,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -181,6 +182,14 @@
     // Every standing-schedule version this tenant has: agreed, pending,
     // superseded, withdrawn, declined. `schedules` is the agreed subset.
     let versions = [];
+    /** This parent's own private schedule drafts — one per child at most.
+     *
+     *  Nobody else can read these: `row_policies.schedule_drafts` is
+     *  `owner_only` with `adults_bypass: false`, so the other parent (an adult
+     *  AND a steward here, which is exactly who the supervision bypass would
+     *  have let in) gets nothing. The "only you can see this" label on the UI is
+     *  a description of that policy, not a promise made by the UI. */
+    let drafts = [];
     /** The tenant's zone, defaulted into a proposal so the parents SEE which
      *  clock their custody days are counted in and can correct it before it
      *  becomes an agreed term. Filled from the hub context at load. */
@@ -293,11 +302,15 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       custodyDays = (await db(`SELECT * FROM ${P}custody_days ORDER BY day`).catch(() => ({ rows: [] }))).rows;
 
       if (canManage()) {
-        const [msg, hn] = await Promise.all([
+        const [msg, hn, dr] = await Promise.all([
           loadMessages(),
           db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`).catch(() => ({ rows: [] })),
+          // "My drafts" is the only query this table has. The WHERE clause is
+          // the row policy's, not ours — owner_only appends it — so an app-side
+          // filter here would be decoration, and its absence is not a leak.
+          db(`SELECT * FROM ${P}schedule_drafts ORDER BY updated_at DESC`).catch(() => ({ rows: [] })),
         ]);
-        messages = msg?.rows ?? []; handoffs = hn.rows;
+        messages = msg?.rows ?? []; handoffs = hn.rows; drafts = dr.rows;
       }
     }
 
@@ -705,7 +718,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       if (sch.pattern === "two_two_three") return "2-2-3 rotation";
       if (sch.pattern === "alternating_weekends") return "Alternating weekends";
       if (sch.pattern === "custom") return `Custom ${normalizeCycle(sch.cycle).length}-day cycle`;
-      return sch.pattern;
+      // A draft is allowed to be half-finished, so it can reach here with no
+      // pattern at all — which must read as unfinished, not as an empty label.
+      return sch.pattern || "Not filled in yet";
     }
 
     // Every pattern is resolved as an offset from anchor_date, so the anchor is
@@ -1088,6 +1103,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const scheduledChildIds = [...new Set([
         ...schedules.map(s => s.child_id),
         ...versions.filter(v => v.status === "pending" || v.status === "draft").map(v => v.child_id),
+        // A child whose only schedule work so far is this parent's private
+        // draft still needs a row — otherwise the draft is saved somewhere the
+        // author cannot find it again.
+        ...drafts.map(d => d.child_id),
       ])].filter(Boolean);
 
       const schedRows = scheduledChildIds.length ? scheduledChildIds.map(cid => {
@@ -1096,6 +1115,8 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         const signed = pending ? signedElsewhere.has(pending.id) : false;
         const stance = pending ? amendmentStance(pending, me?.id, signed) : null;
         const changed = pending && agreed ? describeScheduleChange(agreed, pending) : null;
+        const draft = draftFor(cid);
+        const draftBlocker = draft ? draftSendBlocker(draft, agreed, spaceTimeZone) : null;
         return `
         <div style="padding:8px 0;border-top:1px solid var(--hub-border,#eee)">
           <div class="spread">
@@ -1108,7 +1129,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
                 : `<div class="muted">No agreed schedule yet.</div>`}
             </div>
             <div class="row">
-              ${pending ? "" : `<button class="btn btn-sm" data-editsch="${esc(cid)}">${agreed ? "Propose change" : "Propose schedule"}</button>`}
+              ${pending || draft ? "" : `<button class="btn btn-sm" data-editsch="${esc(cid)}">${agreed ? "Propose change" : "Propose schedule"}</button>`}
               ${agreed && !pending ? `<button class="btn btn-sm btn-danger" data-retiresch="${esc(agreed.id)}">Propose ending it</button>` : ""}
             </div>
           </div>
@@ -1128,6 +1149,20 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
                   ? `<button class="btn btn-primary btn-sm" data-signsch="${esc(pending.id)}">Countersign</button>` : ""}
                 <button class="btn btn-sm btn-danger" data-declinesch="${esc(pending.id)}">${
                   pending.proposed_by === me?.id ? "Withdraw" : "Decline"}</button>
+              </div>
+            </div>` : ""}
+          ${draft ? `
+            <div class="card" style="margin:8px 0 0">
+              <strong>📝 Your draft — only you can see this</strong>
+              <div class="muted">${esc(patternLabel(draft))}${draft.anchor_date ? ` · from ${esc(draft.anchor_date)}` : ""}
+                ${draft.exchange_time ? ` · exchange ${esc(draft.exchange_time)}` : ""}
+                ${draft.timezone ? ` · days counted in ${esc(draft.timezone)}` : ""}</div>
+              <p class="muted" style="margin:6px 0 0">Your co-parent has not been told about this and cannot see it.
+                ${draftBlocker ? esc(draftBlocker) : "Sending it asks them to countersign — it takes effect only when they do."}</p>
+              <div class="row" style="margin-top:8px;gap:8px">
+                <button class="btn btn-sm" data-editdraft="${esc(cid)}">Keep working on it</button>
+                ${draftBlocker ? "" : `<button class="btn btn-primary btn-sm" data-senddraft="${esc(cid)}">Send to your co-parent</button>`}
+                <button class="btn btn-sm btn-danger" data-dropdraft="${esc(draft.id)}">Discard</button>
               </div>
             </div>` : ""}
         </div>`;
@@ -1158,7 +1193,15 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       el.querySelector("#unpair")?.addEventListener("click", unpair);
       el.querySelector("[data-newsch]")?.addEventListener("click", () => openScheduleModal(null));
       el.querySelectorAll("[data-editsch]").forEach(b =>
-        b.addEventListener("click", () => openScheduleModal(agreedVersion(versions, b.dataset.editsch))));
+        b.addEventListener("click", () => openScheduleModal(
+          agreedVersion(versions, b.dataset.editsch), draftFor(b.dataset.editsch))));
+      el.querySelectorAll("[data-editdraft]").forEach(b =>
+        b.addEventListener("click", () => openScheduleModal(
+          agreedVersion(versions, b.dataset.editdraft), draftFor(b.dataset.editdraft))));
+      el.querySelectorAll("[data-senddraft]").forEach(b =>
+        b.addEventListener("click", () => onSendDraft(b.dataset.senddraft)));
+      el.querySelectorAll("[data-dropdraft]").forEach(b =>
+        b.addEventListener("click", () => discardDraft(b.dataset.dropdraft)));
       el.querySelectorAll("[data-retiresch]").forEach(b =>
         b.addEventListener("click", () => onProposeRetirement(b.dataset.retiresch)));
       el.querySelectorAll("[data-signsch]").forEach(b =>
@@ -1196,10 +1239,14 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     // child that has none yet). The form is pre-filled from it so the other
     // parent is asked to countersign a specific difference rather than a fresh
     // schedule they have to diff themselves.
-    function openScheduleModal(existing) {
+    function openScheduleModal(existing, draft = null) {
       const kids = members.filter(m => !isAdult(m, members));
       const adultIds = adults().map(a => a.id);
-      const e = existing || {};
+      // A draft wins the form's values over the agreed version it amends — it is
+      // the author's own later thinking about the same schedule — while
+      // `existing` stays the version being amended, which is what the proposal's
+      // base_version_id and its change summary are computed against.
+      const e = { ...(existing || {}), ...(draft || {}) };
       const zones = [...new Set([e.timezone, spaceTimeZone, "UTC"].filter(Boolean))];
       openModal(`
         <h3>${existing ? "Propose a schedule change" : "Propose a custody schedule"}</h3>
@@ -1240,14 +1287,18 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           <textarea id="f-why" maxlength="500" placeholder="Why you're proposing this…"></textarea></label>
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
+          <button class="btn" id="save-draft">Save as draft</button>
           <button class="btn btn-primary" id="save-sch">Send for countersignature</button>
-        </div>`);
+        </div>
+        <p class="hint">A draft stays private to you — your co-parent is not told about it and cannot
+          see it. Nothing is proposed to them until you send it.</p>`);
       const patSel = modalEl.querySelector("#f-pattern");
       patSel.addEventListener("change", () => {
         modalEl.querySelector("#f-custom-wrap").style.display = patSel.value === "custom" ? "block" : "none";
         modalEl.querySelector("#f-anchor-hint").textContent = anchorHint(patSel.value);
       });
-      modalEl.querySelector("#save-sch").addEventListener("click", () => onProposeAmendment(existing));
+      modalEl.querySelector("#save-sch").addEventListener("click", () => onProposeAmendment(existing, draft));
+      modalEl.querySelector("#save-draft").addEventListener("click", () => onSaveDraft(existing, draft));
     }
 
     // Swap proposal
@@ -1409,33 +1460,57 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
      * BEFORE it is sent, because that array is what gets countersigned and what
      * the hub projects. See compileCycle in logic.js.
      */
-    async function onProposeAmendment(existing) {
-      const child_id = existing?.child_id ?? modalEl.querySelector("#f-child").value;
-      const parent_a_id = modalEl.querySelector("#f-pa").value;
-      const parent_b_id = modalEl.querySelector("#f-pb").value;
+    /**
+     * The schedule form's current values as raw draft fields.
+     *
+     * Deliberately unvalidated: a DRAFT is allowed to be half-finished — that is
+     * the whole point of one — so the checks live at send time, in
+     * onProposeAmendment and draftSendBlocker, not here. The cycle is compiled
+     * on the way out either way, because the canonical day array is what a draft
+     * has to carry for `draftProposalTerms` to produce the same proposal this
+     * form would have.
+     */
+    function readScheduleForm(existing) {
       const pattern = modalEl.querySelector("#f-pattern").value;
-      const anchor_date = modalEl.querySelector("#f-anchor").value;
-      const exchange_time = modalEl.querySelector("#f-time").value || null;
-      const timezone = modalEl.querySelector("#f-tz").value;
-      const rationale = modalEl.querySelector("#f-why").value.trim() || null;
       const customArr = pattern === "custom"
         ? normalizeCycle(modalEl.querySelector("#f-cycle").value.split(",").map(s => s.trim().toLowerCase())) : [];
+      const cycleArr = compileCycle(pattern, customArr);
+      return {
+        child_id: existing?.child_id ?? modalEl.querySelector("#f-child").value,
+        parent_a_id: modalEl.querySelector("#f-pa").value,
+        parent_b_id: modalEl.querySelector("#f-pb").value,
+        pattern,
+        cycle: JSON.stringify(cycleArr),
+        cycle_length: cycleArr.length,
+        anchor_date: modalEl.querySelector("#f-anchor").value,
+        exchange_time: modalEl.querySelector("#f-time").value || null,
+        timezone: modalEl.querySelector("#f-tz").value,
+        rationale: modalEl.querySelector("#f-why").value.trim() || null,
+        base_version_id: existing?.id ?? null,
+      };
+    }
+
+    async function onProposeAmendment(existing, draft = null) {
+      const form = readScheduleForm(existing);
+      const { child_id, parent_a_id, parent_b_id, pattern, anchor_date } = form;
+      // Already compiled by readScheduleForm; re-read rather than re-derived so
+      // a draft and a directly-typed proposal cannot compile differently.
+      const cycleArr = normalizeCycle(form.cycle);
 
       if (!child_id) { hubAlert("Pick a child."); return; }
       if (parent_a_id === parent_b_id) { hubAlert("The two parents must be different people."); return; }
       if (!anchor_date) { hubAlert("Pick a cycle start date."); return; }
-      if (pattern === "custom" && !customArr.length) { hubAlert("Enter a custom cycle like a,a,b,b."); return; }
-
-      const cycleArr = compileCycle(pattern, customArr);
-      if (!cycleArr.length) { hubAlert("That pattern can't be worked out into a rotation."); return; }
-      const cycle = JSON.stringify(cycleArr);
+      if (pattern === "custom" && !cycleArr.length) { hubAlert("Enter a custom cycle like a,a,b,b."); return; }
+      if (!cycleArr.length) { hubAlert("That pattern can’t be worked out into a rotation."); return; }
 
       const terms = {
-        child_id, parent_a_id, parent_b_id, pattern, cycle,
-        cycle_length: cycleArr.length, anchor_date, exchange_time, timezone,
+        child_id, parent_a_id, parent_b_id, pattern,
+        cycle: JSON.stringify(cycleArr),
+        cycle_length: cycleArr.length, anchor_date,
+        exchange_time: form.exchange_time, timezone: form.timezone,
         effective_from: existing?.effective_from ?? null,
         effective_to: existing?.effective_to ?? null,
-        rationale,
+        rationale: form.rationale,
         base_version_id: existing?.id ?? null,
       };
       // Nothing to countersign is not a proposal. Refused here rather than sent,
@@ -1453,6 +1528,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           fallbackError: "Could not record the proposal",
         });
         const result = await agreeSchedule(id, true);
+        // The draft existed to hold work that was not yet a proposal. It is one
+        // now, and the amendment row is the record — a surviving draft would be
+        // a second, private, silently diverging copy of the same schedule.
+        if (draft) await discardDraft(draft.id, { silent: true });
         closeModal();
         currentChildId = child_id;
         await loadData();
@@ -1467,6 +1546,132 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         btn.disabled = false; btn.textContent = "Send for countersignature";
         hubAlert(e.message);
       }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Private drafts
+    //
+    //  A draft is one parent's working copy of a schedule they have not
+    //  proposed. It is the answer to the first hour of a co-parenting space,
+    //  when the other parent has not arrived yet and every way of expressing
+    //  what you want is a proposal addressed to nobody.
+    //
+    //  Three rules hold the feature together:
+    //    1. Nobody but the author can read it — enforced by row_policies
+    //       (owner_only, adults_bypass:false), not by this file.
+    //    2. One per parent per child, updated in place — enforced by the
+    //       policy's max_per_member, which is why saving UPDATEs an existing
+    //       draft rather than inserting a second.
+    //    3. Sending runs the ordinary proposal path unchanged, then deletes the
+    //       draft. There is no such thing as a "sent draft".
+    // ══════════════════════════════════════════════════════════════════════
+
+    /** This parent's draft for a child, if they have one. */
+    function draftFor(childId) {
+      return drafts.find(d => d.child_id === childId) ?? null;
+    }
+
+    async function onSaveDraft(existing, draft) {
+      const form = readScheduleForm(existing);
+      if (!form.child_id) { hubAlert("Pick a child."); return; }
+      const btn = modalEl.querySelector("#save-draft");
+      btn.disabled = true; btn.textContent = "Saving…";
+      const now = new Date().toISOString();
+      try {
+        if (!DEMO) {
+          // UPDATE, never a second INSERT: max_per_member caps this table at one
+          // row per parent per child, so an insert here would be refused by the
+          // policy rather than quietly making a duplicate.
+          if (draft?.id) {
+            await db(`UPDATE ${P}schedule_drafts SET parent_a_id=?, parent_b_id=?, pattern=?, cycle=?,
+                        cycle_length=?, anchor_date=?, exchange_time=?, timezone=?, rationale=?,
+                        base_version_id=?, updated_at=? WHERE id=?`,
+              [form.parent_a_id, form.parent_b_id, form.pattern, form.cycle, form.cycle_length,
+               form.anchor_date, form.exchange_time, form.timezone, form.rationale,
+               form.base_version_id, now, draft.id]);
+          } else {
+            // author_id is forced by the hub on insert (owner_only). Passing it
+            // is how the SQL reads honestly, not how the value is decided.
+            await db(`INSERT INTO ${P}schedule_drafts (id, author_id, child_id, parent_a_id, parent_b_id,
+                        pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, rationale,
+                        base_version_id, created_at, updated_at)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [crypto.randomUUID(), me?.id, form.child_id, form.parent_a_id, form.parent_b_id,
+               form.pattern, form.cycle, form.cycle_length, form.anchor_date, form.exchange_time,
+               form.timezone, form.rationale, form.base_version_id, now, now]);
+          }
+        }
+        closeModal();
+        await loadData();
+        currentChildId = form.child_id;
+        view = "setup";
+        render();
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Save as draft";
+        hubAlert(e.message);
+      }
+    }
+
+    /**
+     * Send a saved draft as a proposal.
+     *
+     * The draft is checked against what is in force RIGHT NOW rather than
+     * against what was in force when it was written: a draft written before the
+     * other parent countersigned a change would otherwise propose reverting them
+     * while looking like an ordinary edit. draftSendBlocker holds that rule; the
+     * remedy is to reopen the draft, not to rebase it silently.
+     */
+    async function onSendDraft(childId) {
+      const draft = draftFor(childId);
+      const agreed = agreedVersion(versions, childId);
+      const blocker = draftSendBlocker(draft, agreed, spaceTimeZone);
+      if (blocker) {
+        hubAlert(blocker);
+        if (draft) openScheduleModal(agreed, draft);
+        return;
+      }
+      const terms = draftProposalTerms(draft, spaceTimeZone);
+      const ok = await hubConfirm({
+        message: `Send this schedule to ${esc(memberName(partnerId) || "your co-parent")}?`,
+        description: "Until now only you could see it. Sending asks them to countersign it, and it "
+          + "takes effect only when they do.",
+        confirmLabel: "Send for countersignature",
+      });
+      if (!ok) return;
+      try {
+        const { id } = await requestJson(`/run/${APP_ID}/api/propose-agreement`, {
+          body: { table: "schedule_versions", values: terms },
+          fallbackError: "Could not record the proposal",
+        });
+        const result = await agreeSchedule(id, true);
+        await discardDraft(draft.id, { silent: true });
+        await loadData();
+        render();
+        notifySchedule(
+          result.locked ? "Custody schedule updated" : "Custody schedule change proposed",
+          result.locked
+            ? `${me?.name} set the standing schedule for ${memberName(terms.child_id)}.`
+            : `${me?.name} proposed a schedule for ${memberName(terms.child_id)}. It takes effect when you countersign it.`,
+          { view: "setup" });
+      } catch (e) { hubAlert(e.message); }
+    }
+
+    /** Delete a draft. Nothing else ever saw it, so there is nothing to retain
+     *  and nobody to tell — unlike every other deletion in this app. */
+    async function discardDraft(id, { silent = false } = {}) {
+      if (!silent) {
+        const ok = await hubConfirm({
+          message: "Discard this draft?",
+          description: "Only you could see it, so nothing is announced. This cannot be undone.",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      try {
+        if (!DEMO) await db(`DELETE FROM ${P}schedule_drafts WHERE id = ?`, [id]);
+        drafts = drafts.filter(d => d.id !== id);
+        if (!silent) { await loadData(); render(); }
+      } catch (e) { if (!silent) hubAlert(e.message); }
     }
 
     /**

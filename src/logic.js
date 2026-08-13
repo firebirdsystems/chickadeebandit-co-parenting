@@ -689,6 +689,80 @@ export function describeScheduleChange(before, after) {
   return changed.length ? joinPhrases(changed) : null;
 }
 
+// ── Private schedule drafts ─────────────────────────────────────────────────
+
+/**
+ * The terms a draft would propose, in the exact shape `/api/propose-agreement`
+ * takes.
+ *
+ * This exists so that "send my draft" and "propose a change from the form" go
+ * through ONE definition of what a proposal's terms are. A draft that compiles
+ * differently from the form it was typed into is a draft that proposes
+ * something its author never saw.
+ *
+ * `cycle` is stored already-compiled — the canonical day-by-day 'a'/'b' array,
+ * not the pattern name — because that array is what gets countersigned, and a
+ * later release changing what "two_two_three" means must not silently change
+ * what a saved draft would propose.
+ *
+ * Returns null when the draft is not proposable yet (the required terms of the
+ * agreement are missing), so a half-finished draft can be saved and reopened
+ * without ever becoming a sendable proposal by accident.
+ */
+export function draftProposalTerms(draft, fallbackTimezone) {
+  if (!draft) return null;
+  const cycle = normalizeCycle(draft.cycle);
+  const timezone = draft.timezone || fallbackTimezone || null;
+  const required = [draft.child_id, draft.parent_a_id, draft.parent_b_id, draft.pattern, draft.anchor_date, timezone];
+  if (required.some((value) => !value) || !cycle.length) return null;
+  if (draft.parent_a_id === draft.parent_b_id) return null;
+  return {
+    child_id: draft.child_id,
+    parent_a_id: draft.parent_a_id,
+    parent_b_id: draft.parent_b_id,
+    pattern: draft.pattern,
+    cycle: JSON.stringify(cycle),
+    cycle_length: cycle.length,
+    anchor_date: draft.anchor_date,
+    exchange_time: draft.exchange_time || null,
+    timezone,
+    effective_from: null,
+    effective_to: null,
+    rationale: draft.rationale || null,
+    base_version_id: draft.base_version_id ?? null,
+  };
+}
+
+/**
+ * Why a draft cannot be sent yet, as a sentence, or null when it can.
+ *
+ * A draft is allowed to be incomplete — that is what makes it a draft — so this
+ * is a send-time check, never a save-time one.
+ *
+ * "Stale" is the case worth naming out loud: the draft was written against one
+ * agreed version and the other parent has since countersigned a different one.
+ * Sending it anyway would propose reverting their change while looking like an
+ * ordinary edit, so the author is told to re-open it against what is now in
+ * force rather than being quietly rebased.
+ */
+export function draftSendBlocker(draft, agreed, fallbackTimezone) {
+  if (!draft) return "There is no draft to send.";
+  if (!draftProposalTerms(draft, fallbackTimezone)) {
+    return "This draft is missing something — open it and finish the pattern, start date and parents.";
+  }
+  const base = draft.base_version_id ?? null;
+  const inForce = agreed?.id ?? null;
+  if (base !== inForce) {
+    return agreed
+      ? "The schedule changed after you started this draft. Open it to check it against what is in force now."
+      : "The schedule this draft was based on is no longer in force. Open it to check it.";
+  }
+  if (agreed && !describeScheduleChange(agreed, draftProposalTerms(draft, fallbackTimezone))) {
+    return "This draft matches the schedule already in force, so there is nothing to propose.";
+  }
+  return null;
+}
+
 // ── Swap-request validation ─────────────────────────────────────────────────
 
 /**

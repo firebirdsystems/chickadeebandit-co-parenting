@@ -50,6 +50,41 @@ describe("manifest.json", () => {
     });
   });
 
+  // A ratchet, and the whole feature rests on it. `owner_only` normally lets
+  // ADULTS read other members' rows (supervision) — and in a co-parenting space
+  // the other parent is an adult and a steward. Drop `adults_bypass: false` and
+  // the private draft becomes readable by precisely the person it is private
+  // from, with no error and no visible change: the UI would go on saying "only
+  // you can see this" while it was no longer true.
+  it("keeps schedule drafts readable only by their author", () => {
+    expect(manifest.row_policies.schedule_drafts).toMatchObject({
+      kind: "owner_only",
+      member_column: "author_id",
+      adults_bypass: false,
+    });
+  });
+
+  // A draft is a working copy, not a history. The cap is what makes "saving
+  // updates the draft" a rule the database enforces rather than a convention
+  // the app happens to follow.
+  it("caps drafts at one per parent per child", () => {
+    expect(manifest.row_policies.schedule_drafts.max_per_member).toEqual({
+      member_column: "author_id",
+      scope_columns: ["child_id"],
+      limit: 1,
+    });
+  });
+
+  // Nobody but the author can read a draft, so a departed author's draft has no
+  // audience at all — retaining it would keep private working notes about a
+  // child alive with no one entitled to see them.
+  it("removes a draft with its author or its child", () => {
+    const refs = Object.fromEntries(
+      manifest.member_references.schedule_drafts.map(r => [r.column, r.on_removed]));
+    expect(refs.author_id).toBe("delete");
+    expect(refs.child_id).toBe("delete");
+  });
+
   // A ratchet, not a preference. `schedule_versions.rationale` is one parent's
   // written argument for changing custody — the single most sensitive field in
   // the table — and `read: "everyone"` put it in front of every child in the
