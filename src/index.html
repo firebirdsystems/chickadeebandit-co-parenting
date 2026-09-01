@@ -130,7 +130,7 @@
   <script type="module">
     import {
       memberColor, initial, esc, isAdult, hubConfirm, hubAlert,
-      sendHubNotification, hubAppUrl, searchMatch,
+      sendHubNotification, hubAppUrl, searchMatch, hubToday,
     } from "/hub-sdk.js";
     import {
       effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
@@ -160,10 +160,14 @@
       return res.json();
     }
 
-    function todayStr() {
-      const d = new Date();
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    }
+    // The HOUSEHOLD's calendar day, not the viewer device's. These dates are
+    // STORED and COMPARED against stored dates, and the hub's own surfaces
+    // (glance, kiosk, cron, `:today` in declared SQL) are all on the household
+    // calendar — a date built from the device clock names a different day near
+    // midnight or for a member in another timezone, and nothing reconciles the
+    // two. hubToday() degrades to the device calendar when no zone is
+    // published, so it is never worse than what it replaces.
+    const todayStr = (now = new Date()) => hubToday(now);
 
     // ── State ────────────────────────────────────────────────────────────────
     let me = window.__CURRENT_MEMBER ?? null;   // may be replaced with a demo adult below
