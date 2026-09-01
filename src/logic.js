@@ -457,7 +457,7 @@ export function upcomingTransitions(custodyDays, fromDate, { childId = null, lim
  */
 export function groupNotesByTransition(notes, custodyDays, todayStr) {
   const transitions = (custodyDays || []).filter((r) => r.is_transition);
-  const key = (childId, day) => `${childId} ${day}`;
+  const key = (childId, day) => `${childId}\u0000${day}`;
   const byKey = new Map(transitions.map((t) => [key(t.child_id, t.day), t]));
 
   const groups = new Map();
