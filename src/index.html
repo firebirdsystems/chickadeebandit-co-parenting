@@ -53,7 +53,7 @@
     .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
     .cal-dow { text-align: center; font-size: 0.68rem; color: var(--hub-text-muted, #6b7280); padding: 2px 0; text-transform: uppercase; }
     .cal-cell { aspect-ratio: 1 / 1; border-radius: 7px; padding: 3px 4px; font-size: 0.72rem; position: relative;
-      display: flex; flex-direction: column; justify-content: space-between; color: #1f2937; overflow: hidden; }
+      display: flex; flex-direction: column; justify-content: space-between; color: var(--hub-text, #1f2937); overflow: hidden; }
     .cal-cell.empty-cell { background: transparent; }
     .cal-cell .dnum { font-weight: 600; opacity: 0.85; }
     .cal-cell .who { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
@@ -84,10 +84,10 @@
 
     /* Badges */
     .badge { font-size: 0.7rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; }
-    .b-pending { background: #fef3c7; color: #92400e; }
-    .b-locked { background: #dcfce7; color: #166534; }
-    .b-declined { background: #fee2e2; color: #991b1b; }
-    .b-cancelled { background: #f3f4f6; color: #4b5563; }
+    .b-pending { background: var(--hub-tint-warning, #fef3c7); color: var(--hub-tint-warning-fg, #92400e); }
+    .b-locked { background: var(--hub-tint-success, #dcfce7); color: var(--hub-tint-success-fg, #166534); }
+    .b-declined { background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #991b1b); }
+    .b-cancelled { background: var(--hub-bg, #f3f4f6); color: var(--hub-text-muted, #4b5563); }
 
     /* Forms */
     label.field { display: block; margin-bottom: 10px; font-size: 0.85rem; }
