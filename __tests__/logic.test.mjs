@@ -28,6 +28,8 @@ import {
   draftProposalTerms, draftSendBlocker,
   soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
   pairingState, partitionMessagesBySession,
+  CYCLE_PRESETS, nameForCycle, presetForCycle, cycleAnchorHint,
+  weekdayOf, visitingWeekdays, formatWeekdaySpan,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -190,6 +192,305 @@ describe("custom cycle", () => {
   it("returns null for an empty cycle", () => {
     const bad = schedule({ pattern: "custom", cycle: "[]" });
     expect(custodyKeyForDate(bad, bad.anchor_date)).toBeNull();
+  });
+});
+
+describe("named cycle shapes", () => {
+  const preset = (key) => CYCLE_PRESETS.find((p) => p.key === key);
+  const swap = (cycle) => cycle.map((d) => (d === "a" ? "b" : "a"));
+  const rotate = (cycle, n) => cycle.slice(n).concat(cycle.slice(0, n));
+
+  it("ships every preset complete, over a whole number of weeks", () => {
+    // These are presets over `custom`, not enum patterns, so nothing validates
+    // their shape on the way in. If one is entered wrong here, two parents
+    // countersign a schedule that is not the pattern they asked for.
+    for (const p of CYCLE_PRESETS) {
+      expect(p.cycle.length % 7, p.key).toBe(0);
+      expect(p.cycle.length, p.key).toBeLessThanOrEqual(14);
+      expect(p.hint.length, p.key).toBeGreaterThan(20);
+      expect(p.label.length, p.key).toBeGreaterThan(2);
+      expect(p.name.length, p.key).toBeGreaterThan(2);
+    }
+    expect(CYCLE_PRESETS.map((p) => p.key)).toEqual([
+      "two_two_five_five", "three_four_four_three", "four_three",
+      "every_other_weekend", "every_other_weekend_midweek",
+    ]);
+  });
+
+  it("splits the two even presets in half and gives the rest the share their name implies", () => {
+    const share = (key) => {
+      const cycle = preset(key).cycle;
+      return Math.round((cycle.filter((d) => d === "b").length / cycle.length) * 1000) / 10;
+    };
+    expect(share("two_two_five_five")).toBe(50);
+    expect(share("three_four_four_three")).toBe(50);
+    expect(share("four_three")).toBe(42.9);
+    expect(share("every_other_weekend")).toBe(14.3);
+    expect(share("every_other_weekend_midweek")).toBe(28.6);
+  });
+
+  it("puts the weekend presets' nights on the weekend, counted from a Monday anchor", () => {
+    // These shapes ARE the calendar weekend, so an array written one position
+    // out is a schedule that misses the weekend entirely and still looks fine.
+    // 2026-03-02 is a Monday; Friday is offset 4 and Saturday 5.
+    const monday = "2026-03-02";
+    const bNights = (key) => {
+      const cycle = preset(key).cycle;
+      const s = schedule({ pattern: "custom", cycle: JSON.stringify(cycle), cycle_length: cycle.length, anchor_date: monday });
+      return cycle.map((_, i) => i).filter((i) => custodyKeyForDate(s, addDays(monday, i)) === "b");
+    };
+    expect(bNights("every_other_weekend")).toEqual([4, 5]);
+    // The same weekend, plus the Wednesday of each week.
+    expect(bNights("every_other_weekend_midweek")).toEqual([2, 4, 5, 9]);
+  });
+
+  it("names the two weekend shapes apart, because the phrase is used for both", () => {
+    // The whole reason these carry their nights. A parent who means Friday and
+    // Saturday and picks the option called "alternating weekends" agrees to
+    // half again as many overnights, and countersigns it.
+    // Anchored, because a weekday name is only meaningful against one.
+    const twoNight = nameForCycle(preset("every_other_weekend").cycle, "2026-03-02");
+    const threeNight = nameForCycle(compileCycle("alternating_weekends"), "2026-03-02");
+    expect(twoNight).toBe("Every other weekend (Fri–Sat)");
+    expect(threeNight).toBe("Alternating weekends (Fri–Sun)");
+    expect(twoNight).not.toBe(threeNight);
+    for (const name of [twoNight, threeNight]) expect(name).toMatch(/Fri/);
+  });
+
+  it("names a weekly pattern written out as a fortnight by the same name", () => {
+    // "The sequence repeats" invites writing 4-3 twice; the engine's modulo
+    // produces identical days either way, so the label must not disagree.
+    const weekly = preset("four_three").cycle;
+    expect(nameForCycle(weekly)).toBe("4-3 rotation");
+    expect(nameForCycle([...weekly, ...weekly])).toBe("4-3 rotation");
+    const s = schedule({ pattern: "custom", cycle: JSON.stringify([...weekly, ...weekly]), cycle_length: 14 });
+    expect(Array.from({ length: 7 }, (_, i) => custodyKeyForDate(s, addDays(s.anchor_date, i)))).toEqual(weekly);
+  });
+
+  it("keeps 2-2-5-5's weekdays fixed across the two weeks", () => {
+    // The property the name promises and the only reason the anchor hint
+    // exists: Monday to Thursday belong to the same parent in both weeks.
+    const cycle = preset("two_two_five_five").cycle;
+    expect(cycle.slice(0, 4)).toEqual(cycle.slice(7, 11));
+  });
+
+  it("runs 3-4-4-3 as three, four, four, three", () => {
+    const cycle = preset("three_four_four_three").cycle;
+    const runs = cycle.join("").match(/a+|b+/g).map((run) => run.length);
+    expect(runs).toEqual([3, 4, 4, 3]);
+  });
+
+  it("names a cycle by its shape, whichever day it starts on", () => {
+    // The anchor decides where counting starts; the NAME is a fact about the
+    // fortnight's shape, so a parent who entered the same pattern from their
+    // own starting day entered 2-2-5-5 and should be told so.
+    const cycle = preset("two_two_five_five").cycle;
+    for (let start = 0; start < cycle.length; start += 1) {
+      expect(nameForCycle(rotate(cycle, start)), `rotated ${start}`).toBe("2-2-5-5 rotation");
+    }
+  });
+
+  it("names a cycle by its shape, whichever parent is 'a'", () => {
+    expect(nameForCycle(swap(preset("three_four_four_three").cycle))).toBe("3-4-4-3 rotation");
+  });
+
+  it("names the enum patterns' shapes too, so a hand-typed one is recognised", () => {
+    // A custom cycle a parent typed out by hand that happens to BE 2-2-3 has
+    // always been 2-2-3; it just had no way of saying so.
+    expect(nameForCycle(compileCycle("two_two_three"))).toBe("2-2-3 rotation");
+    expect(nameForCycle(compileCycle("alternating_weeks"))).toBe("Alternating weeks");
+    expect(nameForCycle(compileCycle("alternating_weekends"), "2026-03-02")).toBe("Alternating weekends (Fri–Sun)");
+  });
+
+  it("gives every named shape a DIFFERENT canonical form", () => {
+    // Two names for one shape would make the label a coin toss. Rotation and
+    // parent-swap invariance is what makes this worth asserting rather than
+    // obvious: it is a much coarser equality than array identity.
+    const named = [
+      compileCycle("alternating_weeks"),
+      compileCycle("two_two_three"),
+      compileCycle("alternating_weekends"),
+      ...CYCLE_PRESETS.map((p) => p.cycle),
+    ];
+    expect(named).toHaveLength(8);
+    // Against one Monday anchor, so the weekday-specific shapes are nameable
+    // at all — their names are a function of the anchor now.
+    const names = named.map((cycle) => nameForCycle(cycle, "2026-03-02"));
+    expect(new Set(names).size).toBe(named.length);
+    expect(names.every((n) => n !== null)).toBe(true);
+  });
+
+  it("names nothing it does not recognise, rather than inventing one", () => {
+    // Null is the common answer, and the right failure direction: a label on a
+    // countersigned document must never claim more than the array says.
+    for (const cycle of [[], ["a"], ["a", "b", "a"], ["a", "a", "b"], null, "not json", ["x", "y"]]) {
+      expect(nameForCycle(cycle), JSON.stringify(cycle)).toBeNull();
+    }
+    // A fortnight that is 7/7 but is not one of the named shapes.
+    expect(nameForCycle(["a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "a", "b"])).toBeNull();
+  });
+
+  it("accepts a stored cycle in either form, because that is how rows arrive", () => {
+    const cycle = preset("two_two_five_five").cycle;
+    expect(nameForCycle(JSON.stringify(cycle))).toBe("2-2-5-5 rotation");
+    expect(presetForCycle(JSON.stringify(cycle))?.key).toBe("two_two_five_five");
+  });
+
+  it("resolves a cycle back to its preset, and only to a preset", () => {
+    expect(presetForCycle(preset("three_four_four_three").cycle)?.key).toBe("three_four_four_three");
+    // The enum patterns are named but are not presets: the picker only exists
+    // inside the custom branch, so offering them there would be two controls
+    // setting the same thing.
+    expect(presetForCycle(compileCycle("two_two_three"))).toBeNull();
+    expect(presetForCycle([])).toBeNull();
+  });
+
+  it("gives a recognised cycle its own anchor advice, and anything else the generic line", () => {
+    expect(cycleAnchorHint(preset("two_two_five_five").cycle)).toBe(preset("two_two_five_five").hint);
+    expect(cycleAnchorHint(["a", "b"])).toMatch(/^The first day of the cycle/);
+    expect(cycleAnchorHint([])).toMatch(/^The first day of the cycle/);
+  });
+
+  it("changes nothing about how a schedule actually resolves", () => {
+    // The point of presets-over-custom: the stored row, and therefore the
+    // hub's projection, is identical to what a new enum value would have
+    // written. Naming is a label; the engine runs the array.
+    const cycle = preset("two_two_five_five").cycle;
+    const s = schedule({ pattern: "custom", cycle: JSON.stringify(cycle), cycle_length: 14 });
+    expect(Array.from({ length: 14 }, (_, i) => custodyKeyForDate(s, addDays(s.anchor_date, i)))).toEqual(cycle);
+    // And it wraps into the next fortnight unchanged.
+    expect(custodyKeyForDate(s, addDays(s.anchor_date, 14))).toBe(cycle[0]);
+  });
+});
+
+describe("a weekday-named pattern and its anchor", () => {
+  const preset = (key) => CYCLE_PRESETS.find((p) => p.key === key);
+  const rotate = (cycle, n) => cycle.slice(n).concat(cycle.slice(0, n));
+  const swap = (cycle) => cycle.map((d) => (d === "a" ? "b" : "a"));
+  // 2026-03-02 is a Monday; the rest of that week follows from it.
+  const MONDAY = "2026-03-02";
+  const TUESDAY = "2026-03-03";
+  const THURSDAY = "2026-03-05";
+
+  it("knows which weekday a date is", () => {
+    expect(weekdayOf(MONDAY)).toBe(1);
+    expect(weekdayOf(TUESDAY)).toBe(2);
+    expect(weekdayOf("2026-03-01")).toBe(0);
+  });
+
+  it("works the weekday name out from the anchor instead of asserting it", () => {
+    // THE BUG, in one assertion. The array places nights by POSITION; the
+    // fifth and sixth nights are Friday and Saturday only if day 1 is a
+    // Monday. Anchored to a Tuesday the very same array is a Saturday-Sunday
+    // arrangement, and it says so rather than carrying a Friday name into a
+    // document both parents sign.
+    const eow = preset("every_other_weekend").cycle;
+    expect(nameForCycle(eow, MONDAY)).toBe("Every other weekend (Fri–Sat)");
+    expect(nameForCycle(eow, TUESDAY)).toBe("Every other weekend (Sat–Sun)");
+  });
+
+  it("names a historical alternating_weekends row by the nights it actually has", () => {
+    // The enum pattern had a hard-coded "(Fri–Sun)" that no anchor could
+    // change, so every row ever signed against another anchor was mislabelled
+    // and no new validation could reach back and repair it.
+    const alt = compileCycle("alternating_weekends");
+    expect(nameForCycle(alt, MONDAY)).toBe("Alternating weekends (Fri–Sun)");
+    // Monday-first ordering, so the stray Monday night leads rather than trails.
+    expect(nameForCycle(alt, TUESDAY)).toBe("Alternating weekends (Mon, Sat–Sun)");
+  });
+
+  it("lets a rotation and an anchor cancel out", () => {
+    // Rotating the array by a day and moving the anchor by a day is the same
+    // schedule. Naming from the anchor gets that right; matching on
+    // orientation alone refused to name it at all.
+    const eow = preset("every_other_weekend").cycle;
+    expect(nameForCycle(rotate(eow, 1), TUESDAY)).toBe("Every other weekend (Fri–Sat)");
+    // And a parent swap never changes the name, which says no parent.
+    expect(nameForCycle(swap(eow), MONDAY)).toBe("Every other weekend (Fri–Sat)");
+  });
+
+  it("declines to call Monday and Tuesday a weekend", () => {
+    // A weekend name has to be earned. With no weekend night in it the shape
+    // falls back to the caller's "Custom N-day cycle" instead.
+    expect(nameForCycle(preset("every_other_weekend").cycle, THURSDAY)).toBeNull();
+    // Nor is there anything to reckon from without an anchor.
+    expect(nameForCycle(preset("every_other_weekend").cycle)).toBeNull();
+    expect(nameForCycle(preset("every_other_weekend").cycle, "not-a-date")).toBeNull();
+  });
+
+  it("leaves the weekday-NEUTRAL names alone, anchor or no anchor", () => {
+    const cycle = preset("two_two_five_five").cycle;
+    for (const anchor of [MONDAY, TUESDAY, THURSDAY, undefined]) {
+      expect(nameForCycle(cycle, anchor), String(anchor)).toBe("2-2-5-5 rotation");
+    }
+    for (let start = 0; start < cycle.length; start += 1) {
+      expect(nameForCycle(rotate(cycle, start), MONDAY), `rotated ${start}`).toBe("2-2-5-5 rotation");
+    }
+  });
+
+  it("reads the visiting parent's weekdays off the cycle", () => {
+    const eow = preset("every_other_weekend").cycle;
+    expect(visitingWeekdays(eow, MONDAY)).toEqual([5, 6]);
+    expect(visitingWeekdays(eow, TUESDAY)).toEqual([6, 0]);
+    // The midweek night joins them, deduped across the fortnight.
+    expect(visitingWeekdays(preset("every_other_weekend_midweek").cycle, MONDAY)).toEqual([3, 5, 6]);
+    // An even split has no visiting parent, so there is nothing to describe.
+    expect(visitingWeekdays(preset("two_two_five_five").cycle, MONDAY)).toBeNull();
+    expect(visitingWeekdays([], MONDAY)).toBeNull();
+    expect(visitingWeekdays(eow, "")).toBeNull();
+  });
+
+  it("collapses weekdays into runs, with the week starting on Monday", () => {
+    // Monday-first ordering is what makes Saturday and Sunday adjacent; on a
+    // Sunday-first week they are the two ends and a weekend reads as two runs.
+    expect(formatWeekdaySpan([5, 6])).toBe("Fri–Sat");
+    expect(formatWeekdaySpan([6, 0])).toBe("Sat–Sun");
+    expect(formatWeekdaySpan([5, 6, 0])).toBe("Fri–Sun");
+    expect(formatWeekdaySpan([3, 5, 6])).toBe("Wed, Fri–Sat");
+    expect(formatWeekdaySpan([1])).toBe("Mon");
+  });
+
+  it("matches a preset only in its own orientation AND its own parents", () => {
+    // presetForCycle drives the picker and the anchor hint, and every hint
+    // names a block by the parent who opens it. A swapped array opens Parent
+    // B's block, so handing it "Parent A's two-day block" is simply wrong; a
+    // rotated one has day 1 somewhere else entirely.
+    const cycle = preset("two_two_five_five").cycle;
+    expect(presetForCycle(cycle)?.key).toBe("two_two_five_five");
+    expect(presetForCycle(swap(cycle))).toBeNull();
+    expect(presetForCycle(rotate(cycle, 1))).toBeNull();
+    expect(cycleAnchorHint(swap(cycle))).toMatch(/^The first day of the cycle/);
+    expect(cycleAnchorHint(cycle)).toBe(preset("two_two_five_five").hint);
+  });
+
+  it("proposes whatever the parents agreed, including an unusual anchor", () => {
+    // A Saturday-Sunday rotation is a real arrangement. An earlier attempt at
+    // this refused it because the array resembled a preset, which blocked a
+    // legitimate schedule and told the parents to "enter the cycle yourself" —
+    // the same array they had just entered.
+    const cycle = preset("every_other_weekend").cycle;
+    const draft = (anchor) => ({
+      child_id: "kid-1", parent_a_id: PA, parent_b_id: PB, pattern: "custom",
+      cycle: JSON.stringify(cycle), cycle_length: 14, anchor_date: anchor, base_version_id: null,
+    });
+    expect(draftSendBlocker(draft(TUESDAY), null, "UTC")).toBeNull();
+    expect(draftSendBlocker(draft(MONDAY), null, "UTC")).toBeNull();
+  });
+
+  it("proves the nights really do move, which is what the name now tracks", () => {
+    const cycle = preset("every_other_weekend").cycle;
+    const nightsFrom = (anchor) => {
+      const s = schedule({ pattern: "custom", cycle: JSON.stringify(cycle), cycle_length: 14, anchor_date: anchor });
+      return cycle
+        .map((_, i) => i)
+        .filter((i) => custodyKeyForDate(s, addDays(anchor, i)) === "b")
+        .map((i) => weekdayOf(addDays(anchor, i)));
+    };
+    expect(nightsFrom(MONDAY)).toEqual([5, 6]);
+    expect(nightsFrom(TUESDAY)).toEqual([6, 0]);
+    // And the label agrees with the nights in both cases — the invariant.
+    expect(nameForCycle(cycle, MONDAY)).toContain(formatWeekdaySpan(nightsFrom(MONDAY)));
+    expect(nameForCycle(cycle, TUESDAY)).toContain(formatWeekdaySpan(nightsFrom(TUESDAY)));
   });
 });
 

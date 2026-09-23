@@ -141,6 +141,7 @@
       compileCycle, mergeScheduleVersion, agreedVersion, openAmendment,
       amendmentStance, canSignAmendment, scheduleNoticeAudience,
       draftProposalTerms, draftSendBlocker,
+      CYCLE_PRESETS, nameForCycle, presetForCycle, cycleAnchorHint,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -720,8 +721,19 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     function patternLabel(sch) {
       if (sch.pattern === "alternating_weeks") return "Alternating weeks";
       if (sch.pattern === "two_two_three") return "2-2-3 rotation";
-      if (sch.pattern === "alternating_weekends") return "Alternating weekends";
-      if (sch.pattern === "custom") return `Custom ${normalizeCycle(sch.cycle).length}-day cycle`;
+      // Alternating weekends falls through to the derived path below, like a
+      // custom cycle: its nights are placed by position too, so "(Fri–Sun)" is
+      // true of a Monday-anchored one and of no other. An agreement signed
+      // years ago against a Tuesday anchor gets the name its nights earn.
+      if (sch.pattern === "custom" || sch.pattern === "alternating_weekends") {
+        // Derived from the cycle AND the anchor, never stored beside them. A
+        // schedule already countersigned is frozen and cannot be relabelled, so
+        // the only way its label can be true is for it to be computed from what
+        // was actually signed — which is also what stops a historical row whose
+        // anchor nobody checked from wearing a name its nights never had.
+        const cyc = normalizeCycle(sch.cycle);
+        return nameForCycle(cyc, sch.anchor_date) ?? `Custom ${cyc.length}-day cycle`;
+      }
       // A draft is allowed to be half-finished, so it can reach here with no
       // pattern at all — which must read as unfinished, not as an empty label.
       return sch.pattern || "Not filled in yet";
@@ -731,12 +743,16 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     // what aligns a rotation to the days of the week. The fixed-shape patterns
     // therefore need the anchor on a specific weekday; say which, at the point
     // the date is picked, rather than leaving it to be discovered afterwards.
-    function anchorHint(pattern) {
+    function anchorHint(pattern, cycle) {
       if (pattern === "alternating_weekends") {
         return "Pick the Monday that opens a week in which Parent B has the weekend.";
       }
       if (pattern === "two_two_three") return "Pick the first day of Parent A's two-day block.";
       if (pattern === "alternating_weeks") return "Pick the first day of one of Parent A's weeks.";
+      // A custom cycle that IS a known shape needs that shape's advice, which
+      // on 2-2-5-5 is the difference between the pattern they asked for and a
+      // valid-looking rotation that is not it.
+      if (pattern === "custom") return cycleAnchorHint(cycle);
       return "The first day of the cycle; the sequence repeats from here.";
     }
 
@@ -1274,13 +1290,18 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
             <option value="custom" ${e.pattern === "custom" ? "selected" : ""}>Custom cycle</option>
           </select></label>
         <div id="f-custom-wrap" style="display:${e.pattern === "custom" ? "block" : "none"}">
+          <label class="field"><span>Start from a named pattern</span>
+            <select id="f-preset">
+              <option value="">Write my own cycle</option>
+              ${CYCLE_PRESETS.map(pre => `<option value="${esc(pre.key)}" ${presetForCycle(e.cycle)?.key === pre.key ? "selected" : ""}>${esc(pre.label)}</option>`).join("")}
+            </select></label>
           <label class="field"><span>Cycle — a = Parent A day, b = Parent B day</span>
             <input id="f-cycle" placeholder="a,a,b,b,a,a,a" value="${esc(normalizeCycle(e.cycle).join(","))}"></label>
-          <p class="hint">One letter per day; the sequence repeats.</p>
+          <p class="hint">One letter per day; the sequence repeats. Picking a named pattern fills this in — edit it afterwards if your arrangement differs.</p>
         </div>
         <label class="field"><span>Cycle start date (day 1 of the pattern)</span>
           <input type="date" id="f-anchor" value="${esc(e.anchor_date ?? todayStr())}"></label>
-        <p class="hint" id="f-anchor-hint">${esc(anchorHint(e.pattern ?? "alternating_weeks"))}</p>
+        <p class="hint" id="f-anchor-hint">${esc(anchorHint(e.pattern ?? "alternating_weeks", e.cycle))}</p>
         <label class="field"><span>Exchange time (optional)</span>
           <input type="time" id="f-time" value="${esc(e.exchange_time ?? "")}"></label>
         <label class="field"><span>Custody days are counted in</span>
@@ -1297,9 +1318,40 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         <p class="hint">A draft stays private to you — your co-parent is not told about it and cannot
           see it. Nothing is proposed to them until you send it.</p>`);
       const patSel = modalEl.querySelector("#f-pattern");
+      const cycleEl = modalEl.querySelector("#f-cycle");
+      const presetSel = modalEl.querySelector("#f-preset");
+      /** The cycle as typed, for the hint and the preset picker's own state. */
+      const typedCycle = () => normalizeCycle(cycleEl.value.split(",").map(t => t.trim().toLowerCase()));
+      const anchorEl = modalEl.querySelector("#f-anchor");
+      const refreshHint = () => {
+        const cycle = patSel.value === "custom" ? typedCycle() : compileCycle(patSel.value, []);
+        // Advice, plus what this start date actually makes the pattern. The
+        // read-back is the whole guard now: nothing refuses an "unusual"
+        // anchor — a Saturday-Sunday rotation is a real arrangement — so the
+        // form says which one you are about to propose instead.
+        const named = nameForCycle(cycle, anchorEl.value);
+        modalEl.querySelector("#f-anchor-hint").textContent =
+          named ? `${anchorHint(patSel.value, typedCycle())} From this date it is ${named}.`
+                : anchorHint(patSel.value, typedCycle());
+      };
+      anchorEl.addEventListener("change", refreshHint);
       patSel.addEventListener("change", () => {
         modalEl.querySelector("#f-custom-wrap").style.display = patSel.value === "custom" ? "block" : "none";
-        modalEl.querySelector("#f-anchor-hint").textContent = anchorHint(patSel.value);
+        refreshHint();
+      });
+      presetSel.addEventListener("change", () => {
+        const preset = CYCLE_PRESETS.find(pre => pre.key === presetSel.value);
+        // "Write my own" clears nothing: a parent who picked a preset and then
+        // changed their mind still wants the fourteen letters in front of them
+        // to edit, which is the whole reason the field stayed editable.
+        if (preset) cycleEl.value = preset.cycle.join(",");
+        refreshHint();
+      });
+      cycleEl.addEventListener("input", () => {
+        // Typing a known shape by hand selects it too — and, more to the point,
+        // brings its anchor advice up before the date is picked.
+        presetSel.value = presetForCycle(typedCycle())?.key ?? "";
+        refreshHint();
       });
       modalEl.querySelector("#save-sch").addEventListener("click", () => onProposeAmendment(existing, draft));
       modalEl.querySelector("#save-draft").addEventListener("click", () => onSaveDraft(existing, draft));

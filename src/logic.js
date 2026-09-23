@@ -132,6 +132,279 @@ export function compileCycle(pattern, customCycle) {
   }
 }
 
+// ── Named shapes, for the custom cycle ──────────────────────────────────────
+
+/**
+ * Fortnight shapes people ask for by name that are NOT in the `pattern` enum.
+ *
+ * These are deliberately presets over the existing `custom` pattern rather than
+ * new enum values, and the reason is worth keeping: since compileCycle, what a
+ * schedule stores and what the hub projects is the canonical day-by-day array,
+ * and `pattern` is the label beside it. A preset that writes the array
+ * therefore produces a row byte-identical to one a new enum value would have
+ * produced — so the enum would buy nothing but a stored name, at the price of
+ * a manifest change and a second source of truth for the same fortnight.
+ *
+ * It also buys something the enum could not. A schedule already countersigned
+ * as `custom` is frozen — it cannot be relabelled, because relabelling a signed
+ * version is exactly what this app exists not to do. A name DERIVED from the
+ * cycle (see nameForCycle) reads those old agreements correctly without
+ * touching them, because it reads the thing that was actually signed.
+ *
+ * What a preset really removes is the transcription error: 2-2-5-5 typed by
+ * hand as fourteen comma-separated letters is one wrong position away from a
+ * different schedule, and nothing downstream can tell that it was a typo — both
+ * parents countersign it and the calendar is quietly wrong for a year.
+ *
+ * `hint` is the anchor advice, and on these it matters more than the array
+ * does: 2-2-5-5's whole point is that each parent keeps the same weekdays, and
+ * that only holds if day 1 is the weekday the parents meant. A misaligned
+ * anchor produces a valid-looking rotation that silently is not the pattern
+ * they asked for.
+ */
+export const CYCLE_PRESETS = [
+  {
+    key: "two_two_five_five",
+    label: "2-2-5-5",
+    name: "2-2-5-5 rotation",
+    // Also written 5-5-2-2 or 5-2-2-5 — the same fortnight entered at a
+    // different point, which is why the name is matched on SHAPE below rather
+    // than on where the array happens to start.
+    cycle: ["a", "a", "b", "b", "a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+    hint: "Pick the Monday that opens Parent A's two-day block — on this pattern each parent keeps the same weekdays every week, and only the anchor makes that true.",
+  },
+  {
+    key: "three_four_four_three",
+    label: "3-4-4-3",
+    name: "3-4-4-3 rotation",
+    cycle: ["a", "a", "a", "b", "b", "b", "b", "a", "a", "a", "a", "b", "b", "b"],
+    hint: "Pick the first day of Parent A's three-day block.",
+  },
+  {
+    key: "four_three",
+    label: "4-3",
+    name: "4-3 rotation",
+    // Seven days, not fourteen: the only pattern here that repeats weekly, so
+    // the same parent has every weekend. Shape matching reduces a cycle to its
+    // repeating period, so someone who wrote it out as a fortnight is told the
+    // same name.
+    cycle: ["a", "a", "a", "a", "b", "b", "b"],
+    hint: "Pick the first day of Parent A's four-day block.",
+  },
+  {
+    key: "every_other_weekend",
+    weekdaySpecific: true,
+    // Named by its NIGHTS, and so is the enum's three-night one in the picker
+    // beside it. "Every other weekend" and "alternating weekends" are the same
+    // phrase in the wild, used for both shapes, and the difference between them
+    // is half again as many overnights on a schedule two people are about to
+    // sign — so neither name is allowed to appear here without its nights.
+    label: "Every other weekend (Fri–Sat, 2 nights)",
+    // A BASE name. The weekdays are not part of it — see nameForCycle, which
+    // works them out from the anchor rather than asserting them here.
+    name: "Every other weekend",
+    cycle: ["a", "a", "a", "a", "b", "b", "a", "a", "a", "a", "a", "a", "a", "a"],
+    hint: "Pick the Monday that opens a week in which Parent B has the weekend.",
+  },
+  {
+    key: "every_other_weekend_midweek",
+    weekdaySpecific: true,
+    label: "Every other weekend, plus a midweek night",
+    name: "Every other weekend plus a midweek night",
+    cycle: ["a", "a", "b", "a", "b", "b", "a", "a", "a", "b", "a", "a", "a", "a"],
+    hint: "Pick the Monday that opens a week in which Parent B has the weekend; the midweek night is the Wednesday of each week.",
+  },
+];
+/**
+ * Every fortnight shape this app can name, as `[label, cycle]`.
+ *
+ * Built from compileCycle for the enum patterns rather than from a second copy
+ * of their arrays: one table of shapes, so a name can never describe an array
+ * the engine does not actually run.
+ */
+const NAMED_SHAPES = [
+  { name: "Alternating weeks", cycle: compileCycle("alternating_weeks") },
+  { name: "2-2-3 rotation", cycle: compileCycle("two_two_three") },
+  // Its nights, for the reason spelled out on the every_other_weekend preset:
+  // this name and that one are the same phrase to a reader, and they are not
+  // the same schedule.
+  { name: "Alternating weekends", cycle: compileCycle("alternating_weekends"), weekdaySpecific: true },
+  ...CYCLE_PRESETS.map((preset) => ({ name: preset.name, cycle: preset.cycle, weekdaySpecific: preset.weekdaySpecific === true })),
+];
+
+/** Weekday order for display: the week starts on Monday, so Sat and Sun are
+ *  adjacent at the end rather than split across the ends of the list. */
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+const WEEKDAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** 0 = Sunday. Day 0 (1970-01-01) was a Thursday, hence the +4. */
+export function weekdayOf(dateStr) {
+  return ((toDayNumber(dateStr) + 4) % 7 + 7) % 7;
+}
+
+/**
+ * A cycle reduced to its SHAPE: the smallest of every rotation of it and of
+ * its parent-swapped twin.
+ *
+ * Both invariances are properties of what a pattern name means, not
+ * conveniences. "2-2-5-5" names the shape of the fortnight; where you start
+ * counting is the anchor's job, and which parent is 'a' is the roster's — the
+ * name says neither. So a parent who typed the same fortnight from their own
+ * starting day, or with the parents the other way round, entered 2-2-5-5 and
+ * should be told so.
+ *
+ * Used only for LABELLING. Nothing here feeds custody resolution, which always
+ * runs the stored array exactly as it was signed.
+ */
+function cycleShape(cycle) {
+  const days = reduceToPeriod(normalizeCycle(cycle));
+  if (!days.length) return "";
+  const swapped = days.map((day) => (day === "a" ? "b" : "a"));
+  let smallest = null;
+  for (const variant of [days, swapped]) {
+    for (let start = 0; start < variant.length; start += 1) {
+      const rotated = variant.slice(start).concat(variant.slice(0, start)).join("");
+      if (smallest === null || rotated < smallest) smallest = rotated;
+    }
+  }
+  return smallest;
+}
+
+/**
+ * A cycle cut down to its shortest repeating block.
+ *
+ * 4-3 is a seven-night pattern, and a parent writing it into a field that says
+ * "the sequence repeats" will quite reasonably write the fortnight out twice.
+ * That is the same schedule — the engine's modulo produces identical days from
+ * either — so it should carry the same name. Without this, one of the two
+ * spellings is named and the other reads as an unnamed custom cycle, which
+ * looks like the app disagreeing with itself about what the parent entered.
+ */
+function reduceToPeriod(days) {
+  for (let period = 1; period < days.length; period += 1) {
+    if (days.length % period !== 0) continue;
+    if (days.every((day, i) => day === days[i % period])) return days.slice(0, period);
+  }
+  return days;
+}
+
+/**
+ * A cycle's shape with its ORIENTATION kept: parent-swapped, but not rotated.
+ *
+ * Rotation invariance is right for a name that says nothing about weekdays —
+ * 2-2-5-5 is 2-2-5-5 wherever you start counting. It is WRONG for a name that
+ * does. "Every other weekend (Fri–Sat)" is a claim about which nights, and
+ * which nights a position lands on depends on where day 1 is; rotate the array
+ * and the same shape is a Saturday–Sunday arrangement wearing a Friday name.
+ *
+ * Parent swap stays invariant in both: no name here says which parent.
+ */
+function orientedShape(cycle) {
+  const days = reduceToPeriod(normalizeCycle(cycle));
+  if (!days.length) return "";
+  const swapped = days.map((day) => (day === "a" ? "b" : "a")).join("");
+  const plain = days.join("");
+  return plain < swapped ? plain : swapped;
+}
+
+/**
+ * The name for a cycle's shape, or null when it matches nothing known.
+ *
+ * Null is the common and correct answer: a hand-entered rotation that is not
+ * one of the named shapes has no name, and inventing one for it would be a
+ * label that claims more than the array says. Callers fall back to
+ * "Custom N-day cycle".
+ */
+export function nameForCycle(cycle, anchorDate) {
+  const shape = cycleShape(cycle);
+  if (!shape) return null;
+  const hit = NAMED_SHAPES.find((known) => cycleShape(known.cycle) === shape);
+  if (!hit) return null;
+  if (!hit.weekdaySpecific) return hit.name;
+
+  // A weekday-specific shape places its nights by POSITION, and a position is
+  // only a weekday once the anchor is fixed. So the weekdays are WORKED OUT
+  // from the anchor rather than asserted by the name: the same array anchored
+  // to a Tuesday is a Saturday-Sunday arrangement, and it is entitled to say
+  // so. This is also why nothing here validates the anchor — there is no wrong
+  // anchor, only a name that has to keep up with the one that was chosen.
+  const weekdays = visitingWeekdays(cycle, anchorDate);
+  // No anchor to reckon from (a half-finished draft), or a rotation whose
+  // nights do not land on a weekend at all: say nothing rather than call
+  // Monday and Tuesday a weekend. The caller falls back to "Custom N-day".
+  if (!weekdays || !weekdays.some((d) => d === 0 || d === 6)) return null;
+  return `${hit.name} (${formatWeekdaySpan(weekdays)})`;
+}
+
+/**
+ * The weekdays the VISITING parent has, for a cycle anchored to a date.
+ *
+ * "Visiting" is whichever side holds fewer nights — the side these patterns
+ * are named for. Null when there is no usable anchor or the sides are even, in
+ * which case there is nothing for a weekend name to describe.
+ */
+export function visitingWeekdays(cycle, anchorDate) {
+  const days = reduceToPeriod(normalizeCycle(cycle));
+  if (!days.length || !anchorDate || !/^\d{4}-\d{2}-\d{2}$/.test(String(anchorDate))) return null;
+  const aCount = days.filter((d) => d === "a").length;
+  if (aCount * 2 === days.length) return null;
+  const visiting = aCount * 2 < days.length ? "a" : "b";
+  const anchor = weekdayOf(anchorDate);
+  const seen = new Set();
+  days.forEach((side, i) => { if (side === visiting) seen.add((anchor + i) % 7); });
+  return WEEK_ORDER.filter((d) => seen.has(d));
+}
+
+/**
+ * Weekdays as a compact span: [5,6] is "Fri–Sat", [3,5,6] is "Wed, Fri–Sat".
+ *
+ * Runs are collapsed in WEEK_ORDER, which starts on Monday — so Saturday and
+ * Sunday are adjacent and a weekend reads as one range instead of two ends.
+ */
+export function formatWeekdaySpan(weekdays) {
+  const ordered = WEEK_ORDER.filter((d) => weekdays.includes(d));
+  const runs = [];
+  for (const day of ordered) {
+    const last = runs[runs.length - 1];
+    const prev = last && WEEK_ORDER[WEEK_ORDER.indexOf(last[last.length - 1]) + 1];
+    if (last && prev === day) last.push(day);
+    else runs.push([day]);
+  }
+  return runs
+    .map((run) => (run.length > 1 ? `${WEEKDAY_ABBR[run[0]]}\u2013${WEEKDAY_ABBR[run[run.length - 1]]}` : WEEKDAY_ABBR[run[0]]))
+    .join(", ");
+}
+
+/**
+ * The preset a cycle is an instance of, or null.
+ *
+ * ORIENTATION-PRESERVING, unlike nameForCycle: this drives the picker's
+ * selection and the anchor advice, and both are about where day 1 sits. A
+ * cycle rotated by a day is the same pattern and a different starting point,
+ * so it is deliberately NOT recognised here — every preset's hint names the
+ * block day 1 opens, and handing that advice to an array whose day 1 is
+ * somewhere else is worse than the generic line. Reopening a draft saved from
+ * a preset still selects it, because that array was written from the preset.
+ *
+ * Only the presets, never the enum patterns: the picker exists only inside the
+ * custom branch.
+ */
+export function presetForCycle(cycle) {
+  const days = reduceToPeriod(normalizeCycle(cycle)).join("");
+  if (!days) return null;
+  // EXACT: same rotation and same parents. Every preset hint names a block by
+  // the parent who opens it ("Parent A's two-day block"), so a swapped array —
+  // where day 1 opens Parent B's — must not be handed that sentence. Rotation
+  // matters for the same reason: the hint is about where day 1 sits.
+  return CYCLE_PRESETS.find((preset) => preset.cycle.join("") === days) ?? null;
+}
+
+/** The anchor advice for a custom cycle: the preset's, or the generic one. */
+export function cycleAnchorHint(cycle) {
+  return presetForCycle(cycle)?.hint ?? "The first day of the cycle; the sequence repeats from here.";
+}
+
 /** Accepts a JSON string or an array; returns a clean array of 'a'/'b'. */
 export function normalizeCycle(cycle) {
   let arr = cycle;

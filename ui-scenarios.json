@@ -304,6 +304,107 @@
           "as": "parent"
         }
       ]
+    },
+    {
+      "name": "a named preset fills the custom cycle, and the agreed schedule reads back by that name",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"setup\"]",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-newsch]",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "#f-pattern",
+          "as": "parent"
+        },
+        {
+          "action": "select",
+          "selector": "#f-child",
+          "value": "{{kid}}",
+          "as": "parent"
+        },
+        {
+          "action": "select",
+          "selector": "#f-pattern",
+          "value": "custom",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "#f-preset",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "the sequence repeats from here",
+          "as": "parent"
+        },
+        {
+          "action": "select",
+          "selector": "#f-preset",
+          "value": "two_two_five_five",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "each parent keeps the same weekdays every week",
+          "as": "parent"
+        },
+        {
+          "action": "fill",
+          "selector": "#f-anchor",
+          "value": "2026-03-02",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "#save-sch",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-retiresch]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "2-2-5-5 rotation",
+          "as": "parent"
+        },
+        {
+          "action": "expectNoText",
+          "text": "Custom 14-day cycle",
+          "as": "parent"
+        },
+        {
+          "action": "reload",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": ".cal-grid",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "2-2-5-5 rotation",
+          "as": "parent"
+        }
+      ]
     }
   ]
 }
