@@ -533,6 +533,280 @@
           }
         }
       ]
+    },
+    {
+      "name": "a locked swap's frozen terms and both signatures cannot be rewritten, unwound or forged by either parent through app SQL, and editing the request afterwards moves nothing",
+      "members": { "a": "adult", "b": "adult", "kid": "child" },
+      "granted": ["kid"],
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+          "params": [
+            "sw1",
+            "{{a}}",
+            "{{b}}",
+            "{{kid}}",
+            "2026-02-01",
+            "2026-02-03",
+            "{{a}}",
+            "grandma visiting",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+          ]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_agreements (id, requester_id, responder_id, requester_agreed, responder_agreed, status, locked_at, updated_at, child_id, start_date, end_date, to_parent_id, note) VALUES (?, ?, ?, 1, 1, 'locked', ?, ?, ?, ?, ?, ?, ?)",
+          "params": [
+            "sw1",
+            "{{a}}",
+            "{{b}}",
+            "2026-01-02T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            "{{kid}}",
+            "2026-02-01",
+            "2026-02-03",
+            "{{a}}",
+            "grandma visiting"
+          ]
+        },
+        {
+          "comment": "The responder cannot take back their signature or reopen the swap.",
+          "action": "db",
+          "as": "b",
+          "sql": "UPDATE app_co_parenting__swap_agreements SET responder_agreed = 0, status = 'pending', locked_at = NULL WHERE id = 'sw1'",
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "comment": "The requester cannot stretch the agreed dates or redirect the child after the lock.",
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__swap_agreements SET end_date = '2026-02-28', to_parent_id = ? WHERE id = 'sw1'",
+          "params": ["{{a}}"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "DELETE FROM app_co_parenting__swap_agreements WHERE id = 'sw1'",
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "comment": "Neither parent can mint a pre-locked agreement carrying the other parent's signature.",
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__swap_agreements (id, requester_id, responder_id, requester_agreed, responder_agreed, status, locked_at, updated_at, child_id, start_date, end_date, to_parent_id) VALUES ('forged', ?, ?, 1, 1, 'locked', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z', ?, '2026-03-01', '2026-03-31', ?)",
+          "params": ["{{a}}", "{{b}}", "{{kid}}", "{{a}}"],
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "comment": "The party_scoped request row stays writable after the lock (001_init.sql) — that must change nothing anyone relies on.",
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__swap_requests SET end_date = '2026-02-28', status = 'cancelled' WHERE id = 'sw1'",
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id, status, requester_agreed, responder_agreed, start_date, end_date, to_parent_id FROM app_co_parenting__swap_agreements",
+          "expect": {
+            "status": 200,
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "id": "sw1",
+                "status": "locked",
+                "requester_agreed": 1,
+                "responder_agreed": 1,
+                "start_date": "2026-02-01",
+                "end_date": "2026-02-03",
+                "to_parent_id": "scn-a"
+              }
+            ]
+          }
+        },
+        {
+          "comment": "The negotiation record is adults-only; a child granted the app still cannot read it.",
+          "action": "db",
+          "as": "kid",
+          "sql": "SELECT id FROM app_co_parenting__swap_agreements",
+          "expect": { "status": 403, "errorIncludes": "adult" }
+        }
+      ]
+    },
+    {
+      "name": "one parent cannot countersign a pending swap on the other parent's behalf through app SQL",
+      "members": { "a": "adult", "b": "adult" },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, status, created_at, updated_at) VALUES (?, ?, ?, 'child-1', '2026-02-01', '2026-02-03', ?, 'pending', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+          "params": ["sw2", "{{a}}", "{{b}}", "{{a}}"]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_agreements (id, requester_id, responder_id, requester_agreed, responder_agreed, status, updated_at) VALUES (?, ?, ?, 1, 0, 'pending', '2026-01-01T00:00:00Z')",
+          "params": ["sw2", "{{a}}", "{{b}}"]
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "UPDATE app_co_parenting__swap_agreements SET responder_agreed = 1, status = 'locked', locked_at = '2026-01-02T00:00:00Z' WHERE id = 'sw2'",
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "comment": "Nor can the responder decline by flipping the requester's side off.",
+          "action": "db",
+          "as": "b",
+          "sql": "UPDATE app_co_parenting__swap_agreements SET requester_agreed = 0, status = 'cancelled' WHERE id = 'sw2'",
+          "expect": { "status": 403, "errorIncludes": "endpoint" }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id, status, requester_agreed, responder_agreed, locked_at FROM app_co_parenting__swap_agreements WHERE id = 'sw2'",
+          "expect": {
+            "status": 200,
+            "rowCount": 1,
+            "rowsContain": [
+              { "id": "sw2", "status": "pending", "requester_agreed": 1, "responder_agreed": 0, "locked_at": null }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a parent's private schedule draft is invisible to the other parent, who can neither edit, delete nor forge one, and the author keeps only one draft per child",
+      "members": { "a": "adult", "b": "adult" },
+      "steps": [
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, parent_a_id, parent_b_id, pattern, anchor_date, timezone, rationale, created_at, updated_at) VALUES ('dr-a', ?, 'child-1', ?, ?, 'alternating_weeks', '2026-03-02', 'America/Denver', 'new job starts in March', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+          "params": ["{{a}}", "{{a}}", "{{b}}"],
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id, rationale FROM app_co_parenting__schedule_drafts",
+          "expect": { "status": 200, "rowCount": 0 }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "UPDATE app_co_parenting__schedule_drafts SET rationale = 'rewritten', pattern = 'custom' WHERE id = 'dr-a'",
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "DELETE FROM app_co_parenting__schedule_drafts WHERE id = 'dr-a'",
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT id, author_id, pattern, rationale FROM app_co_parenting__schedule_drafts",
+          "expect": {
+            "status": 200,
+            "rowCount": 1,
+            "rowsContain": [
+              {
+                "id": "dr-a",
+                "author_id": "scn-a",
+                "pattern": "alternating_weeks",
+                "rationale": "new job starts in March"
+              }
+            ]
+          }
+        },
+        {
+          "comment": "max_per_member: one working copy per parent per child.",
+          "action": "db",
+          "as": "a",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, pattern, created_at, updated_at) VALUES ('dr-a2', ?, 'child-1', 'custom', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+          "params": ["{{a}}"],
+          "expect": { "status": 403, "errorIncludes": "max_per_member" }
+        },
+        {
+          "comment": "The other parent's own draft for the same child is theirs, and a does not see it.",
+          "action": "db",
+          "as": "b",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, pattern, created_at, updated_at) VALUES ('dr-b', ?, 'child-1', 'two_two_three', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+          "params": ["{{b}}"],
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT id FROM app_co_parenting__schedule_drafts",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-a" }] }
+        },
+        {
+          "comment": "author_id is forced by the hub: a draft that names the other parent as its author is still the writer's own.",
+          "action": "db",
+          "as": "b",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, pattern, created_at, updated_at) VALUES ('dr-forged', ?, 'child-2', 'custom', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z')",
+          "params": ["{{a}}"],
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT id FROM app_co_parenting__schedule_drafts",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-a" }] }
+        },
+        {
+          "action": "db",
+          "as": "b",
+          "sql": "SELECT id, author_id FROM app_co_parenting__schedule_drafts WHERE id = 'dr-forged'",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-forged", "author_id": "scn-b" }] }
+        }
+      ]
+    },
+    {
+      "name": "in a shared space the steward gets no supervisor reach into a participant's schedule draft, and a participant cannot read the steward's",
+      "context": "shared_space",
+      "members": { "a": "adult", "steward": "admin" },
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, pattern, rationale, created_at, updated_at) VALUES ('dr-a', ?, 'child-1', 'alternating_weeks', 'private argument', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+          "params": ["{{a}}"]
+        },
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__schedule_drafts (id, author_id, child_id, pattern, rationale, created_at, updated_at) VALUES ('dr-s', ?, 'child-1', 'custom', 'steward reasons', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+          "params": ["{{steward}}"]
+        },
+        {
+          "action": "db",
+          "as": "steward",
+          "sql": "SELECT id FROM app_co_parenting__schedule_drafts",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-s" }] }
+        },
+        {
+          "action": "db",
+          "as": "steward",
+          "sql": "UPDATE app_co_parenting__schedule_drafts SET rationale = 'steward edit' WHERE id = 'dr-a'",
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "steward",
+          "sql": "DELETE FROM app_co_parenting__schedule_drafts WHERE id = 'dr-a'",
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db",
+          "as": "a",
+          "sql": "SELECT id, rationale FROM app_co_parenting__schedule_drafts",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-a", "rationale": "private argument" }] }
+        }
+      ]
     }
   ]
 }
