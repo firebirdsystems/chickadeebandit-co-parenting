@@ -121,7 +121,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>🧭 Co-Parenting</h1>
+    <h1><span id="page-glyph"></span> Co-Parenting</h1>
     <p class="sub">Custody schedule, swaps, and a shared record — kept straight between two homes.</p>
     <div id="tabs" class="tabs"></div>
     <div id="content"></div>
@@ -130,8 +130,11 @@
   <script type="module">
     import {
       memberColor, initial, esc, isAdult, hubConfirm, hubAlert,
-      sendHubNotification, hubAppUrl, searchMatch, hubToday,
+      sendHubNotification, hubAppUrl, searchMatch, hubToday, glyph, chickadee,
     } from "/hub-sdk.js";
+
+    // Static markup cannot call the SDK helpers, so fill the heading glyph from script.
+    document.getElementById("page-glyph").innerHTML = glyph("compass");
     import {
       effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
       nextTransition, upcomingTransitions, groupNotesByTransition,
@@ -501,17 +504,17 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     //  Rendering
     // ══════════════════════════════════════════════════════════════════════════
     const TABS = [
-      ["schedule", "📅 Schedule"],
-      ["swaps",    "🔄 Swaps"],
-      ["messages", "💬 Messages"],
-      ["handoffs", "📋 Handoffs"],
-      ["setup",    "⚙️ Setup"],
+      ["schedule", "calendar",  "Schedule"],
+      ["swaps",    "swap",      "Swaps"],
+      ["messages", "messages",  "Messages"],
+      ["handoffs", "checklist", "Handoffs"],
+      ["setup",    "gear",      "Setup"],
     ];
 
     function render() {
       const tabsEl = document.getElementById("tabs");
-      tabsEl.innerHTML = TABS.map(([id, label]) =>
-        `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${esc(label)}</button>`
+      tabsEl.innerHTML = TABS.map(([id, icon, label]) =>
+        `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${glyph(icon)} ${esc(label)}</button>`
       ).join("");
       tabsEl.querySelectorAll("[data-tab]").forEach(b =>
         b.addEventListener("click", () => {
@@ -538,7 +541,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         // no readable version but there ARE projected days, draw the calendar from
         // `custody_days` — the same rows the hub's Today and glance surfaces use.
         if (custodyDays.length) { renderProjectedSchedule(el); return; }
-        el.innerHTML = `<div class="empty">No custody schedule yet.<br><br>
+        el.innerHTML = `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No custody schedule yet.<br><br>
           ${canManage() ? `<button class="btn btn-primary" data-goto="setup">Set up a schedule</button>` : `Ask a parent to set one up.`}</div>`;
         el.querySelector("[data-goto]")?.addEventListener("click", () => { view = "setup"; render(); });
         return;
@@ -768,7 +771,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         return;
       }
       const list = schedules.length
-        ? (swaps.length ? swaps.map(swapCard).join("") : `<div class="empty">No swap requests yet.</div>`)
+        ? (swaps.length ? swaps.map(swapCard).join("") : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No swap requests yet.</div>`)
         : `<div class="empty">Add a custody schedule in Setup before proposing swaps.</div>`;
       el.innerHTML = `
         <div class="spread" style="margin-bottom:12px">
@@ -941,7 +944,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
     // ── Messages view ────────────────────────────────────────────────────────
     function renderMessages(el) {
-      if (!canManage()) { el.innerHTML = `<div class="empty">The message log is private to the two parents.</div>`; return; }
+      if (!canManage()) { el.innerHTML = `<div class="empty"><div>${chickadee("locked", { size: 72 })}</div>The message log is private to the two parents.</div>`; return; }
       const active = currentPairingState() === "active";
       // Without an active pairing there is nothing to send, but there may still
       // be a record to READ: the parent's own history does not disappear
@@ -988,11 +991,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           ${bubbles(group.messages)}
         </div>`).join("");
       const thread = shown.length ? archive + bubbles(current) : (searchQ
-        ? `<div class="empty">No messages match "${esc(searchQ)}".</div>`
-        : `<div class="empty">No messages yet. Say hello to ${esc(memberName(partnerId))}.</div>`);
+        ? `<div class="empty"><div>${chickadee("searching", { size: 72 })}</div>No messages match "${esc(searchQ)}".</div>`
+        : `<div class="empty"><div>${chickadee("mail", { size: 72 })}</div>No messages yet. Say hello to ${esc(memberName(partnerId))}.</div>`);
 
       el.innerHTML = `
-        <p class="immutable-note">🔒 Messages are permanent — they can't be edited or deleted, so this stays a trustworthy record for both of you.</p>
+        <p class="immutable-note">${glyph("lock")} Messages are permanent — they can't be edited or deleted, so this stays a trustworthy record for both of you.</p>
         ${messages.length ? `<div class="search-row"><input id="search" class="search-input" type="search" placeholder="Search messages…" aria-label="Search messages" value="${esc(searchQ)}" /></div>` : ""}
         <div class="thread">${thread}</div>
         ${active ? `
@@ -1069,7 +1072,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
       const body = (groups.length || unanchored.length)
         ? groupHtml + otherHtml
-        : `<div class="empty">No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`;
+        : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`;
 
       el.innerHTML = `
         <div class="spread" style="margin-bottom:12px">
@@ -1106,11 +1109,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         unpaired: suggested
           ? `<p class="muted">Confirm <b>${esc(suggested.name)}</b> as your co-parent to open your shared message log and enable swap requests.</p>`
           : `<p class="muted">Not paired yet. Choose your co-parent so you can share a private message log.</p>`,
-        active: `<p>✅ Paired with <b>${esc(memberName(partnerId))}</b>.</p>`,
-        awaiting: `<p>⏳ You chose <b>${esc(memberName(partnerId))}</b> — waiting for them to choose you back. We've let them know.</p>`,
+        active: `<p>${glyph("tick")} Paired with <b>${esc(memberName(partnerId))}</b>.</p>`,
+        awaiting: `<p>${glyph("hourglass")} You chose <b>${esc(memberName(partnerId))}</b> — waiting for them to choose you back. We've let them know.</p>`,
         // Naming a new co-parent starts a new record; it never reopens the old
         // one, and never exposes it to whoever comes next.
-        ended: `<p>⛔ Your pairing with <b>${esc(memberName(partnerId))}</b> has ended. Your record of it is kept and stays readable to you both.
+        ended: `<p>${glyph("warning")} Your pairing with <b>${esc(memberName(partnerId))}</b> has ended. Your record of it is kept and stays readable to you both.
           Choosing someone else starts a separate record.</p>`,
       }[currentPairingState()];
       // Pre-checked, never pre-saved: the radio still has to be confirmed, so
@@ -1155,7 +1158,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           </div>
           ${pending ? `
             <div class="card" style="margin:8px 0 0">
-              <strong>⏳ Change proposed${pending.proposed_by ? ` by ${esc(memberName(pending.proposed_by))}` : ""}</strong>
+              <strong>${glyph("hourglass")} Change proposed${pending.proposed_by ? ` by ${esc(memberName(pending.proposed_by))}` : ""}</strong>
               <div class="muted">${changed ? `Changes ${esc(changed)}.` : "Sets the standing schedule."}
                 ${pending.rationale ? ` “${esc(pending.rationale)}”` : ""}</div>
               <div class="muted">${esc(patternLabel(pending))} · from ${esc(pending.anchor_date ?? "?")}
@@ -1173,7 +1176,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
             </div>` : ""}
           ${draft ? `
             <div class="card" style="margin:8px 0 0">
-              <strong>📝 Your draft — only you can see this</strong>
+              <strong>${glyph("pencil")} Your draft — only you can see this</strong>
               <div class="muted">${esc(patternLabel(draft))}${draft.anchor_date ? ` · from ${esc(draft.anchor_date)}` : ""}
                 ${draft.exchange_time ? ` · exchange ${esc(draft.exchange_time)}` : ""}
                 ${draft.timezone ? ` · days counted in ${esc(draft.timezone)}` : ""}</div>
