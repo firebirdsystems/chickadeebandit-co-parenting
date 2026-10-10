@@ -2,7 +2,7 @@
   "id": "co-parenting",
   "name": "Co-Parenting",
   "version": "1.7.0",
-  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that BOTH parents countersign before they take effect, countersigned one-off swaps whose terms are frozen server-side at approval, a message log that cannot be edited or deleted after sending, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, a message log that cannot be edited or deleted after sending, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -409,6 +409,9 @@
         "base_version_column": "base_version_id",
         "superseded_value": "superseded"
       },
+      "late_signature": {
+        "signed_at_column": "countersigned_at"
+      },
       "proposal": {
         "allowed_columns": [
           "child_id",
@@ -621,7 +624,7 @@
         "description": "Every message between the co-parents, oldest first. Append-only — messages cannot be edited or deleted.",
         "source": {
           "kind": "sql",
-          "query": "SELECT sent_at AS sent_at, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND sent_at <= :range_end ORDER BY sent_at"
+          "query": "SELECT sent_at AS sent_at, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND substr(sent_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY sent_at"
         },
         "columns": [
           {
@@ -693,15 +696,15 @@
       {
         "id": "standing_schedule",
         "title": "Standing schedule history",
-        "description": "Every agreed version of the standing rotation, with the terms exactly as frozen when both parents countersigned, and when each was superseded.",
+        "description": "Every version of the standing rotation that has been in force, with its terms exactly as frozen when it was agreed, whether both parents signed it or it took effect on one parent's signature (and when the second was added, if it was added later), and whether it was later superseded.",
         "source": {
           "kind": "sql",
-          "query": "SELECT agreed_at AS agreed_at, child_id AS child, pattern AS pattern, cycle AS cycle, anchor_date AS anchor_date, exchange_time AS exchange_time, timezone AS timezone, parent_a_id AS parent_a, parent_b_id AS parent_b, proposed_by AS proposed_by, rationale AS rationale, status AS status FROM app_co_parenting__schedule_versions WHERE status IN ('agreed','superseded') AND agreed_at >= :range_start AND agreed_at <= :range_end ORDER BY agreed_at"
+          "query": "SELECT agreed_at AS agreed_at, child_id AS child, pattern AS pattern, cycle AS cycle, anchor_date AS anchor_date, exchange_time AS exchange_time, timezone AS timezone, parent_a_id AS parent_a, parent_b_id AS parent_b, proposed_by AS proposed_by, rationale AS rationale, status || CASE WHEN household_a_agreed = 1 AND household_b_agreed = 1 THEN ', signed by both parents' ELSE ', signed by one parent' END || CASE WHEN countersigned_at IS NOT NULL THEN ' (second signature ' || substr(countersigned_at, 1, 10) || ')' ELSE '' END AS state FROM app_co_parenting__schedule_versions WHERE status IN ('agreed','superseded') AND agreed_at >= :range_start AND substr(agreed_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY agreed_at"
         },
         "columns": [
           {
             "key": "agreed_at",
-            "label": "Countersigned",
+            "label": "In force from",
             "format": "datetime"
           },
           {
@@ -750,7 +753,7 @@
             "label": "Reason"
           },
           {
-            "key": "status",
+            "key": "state",
             "label": "State"
           }
         ]
@@ -758,10 +761,10 @@
       {
         "id": "swap_requests",
         "title": "Swap requests",
-        "description": "Requested schedule changes and how each was answered.",
+        "description": "Requested schedule changes and how each was answered. The outcome and terms are the countersigned agreement's wherever one exists (\"locked\" means both parents confirmed it), not the request's own editable copy.",
         "source": {
           "kind": "sql",
-          "query": "SELECT created_at AS created_at, child_id AS child, start_date AS start_date, end_date AS end_date, requester_id AS requester, responder_id AS responder, to_parent_id AS to_parent, status AS status, note AS note FROM app_co_parenting__swap_requests WHERE created_at >= :range_start AND created_at <= :range_end ORDER BY created_at"
+          "query": "SELECT r.created_at AS created_at, COALESCE(a.child_id, r.child_id) AS child, COALESCE(a.start_date, r.start_date) AS start_date, COALESCE(a.end_date, r.end_date) AS end_date, r.requester_id AS requester, r.responder_id AS responder, COALESCE(a.to_parent_id, r.to_parent_id) AS to_parent, COALESCE(a.status, r.status) AS status, COALESCE(a.note, r.note) AS note FROM app_co_parenting__swap_requests r LEFT JOIN app_co_parenting__swap_agreements a ON a.id = r.id WHERE r.created_at >= :range_start AND substr(r.created_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY r.created_at"
         },
         "columns": [
           {
@@ -855,5 +858,28 @@
   "icon": "🧭",
   "resource_limits": {
     "max_db_bytes": 52428800
+  },
+  "preload": {
+    "swap_requests": {
+      "sql": "SELECT * FROM app_co_parenting__swap_requests ORDER BY created_at DESC"
+    },
+    "schedule_drafts": {
+      "sql": "SELECT * FROM app_co_parenting__schedule_drafts ORDER BY updated_at DESC"
+    },
+    "schedule_amendments": {
+      "sql": "SELECT * FROM app_co_parenting__schedule_amendments ORDER BY created_at DESC"
+    },
+    "schedule_versions": {
+      "sql": "SELECT * FROM app_co_parenting__schedule_versions"
+    },
+    "swap_agreements": {
+      "sql": "SELECT * FROM app_co_parenting__swap_agreements"
+    },
+    "custody_days": {
+      "sql": "SELECT * FROM app_co_parenting__custody_days WHERE day >= date(?, '-45 days') ORDER BY day",
+      "params": [
+        ":today"
+      ]
+    }
   }
 }

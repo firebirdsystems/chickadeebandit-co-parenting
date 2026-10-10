@@ -1,0 +1,589 @@
+{
+  "seed": [
+    {
+      "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, datetime('now','-90 days'))",
+      "params": [
+        "{{me}}",
+        "{{partner}}",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__partner_config (member_id, partner_id, session_id, created_at) VALUES (?, ?, ?, datetime('now','-90 days'))",
+      "params": [
+        "{{partner}}",
+        "{{me}}",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__schedule_amendments (id, household_a_id, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-60 days'), datetime('now','-60 days'))",
+      "params": [
+        "perf-sch",
+        "perf-home",
+        "{{me}}",
+        "{{child}}",
+        "{{me}}",
+        "{{partner}}",
+        "alternating_weeks",
+        "[\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"b\", \"b\", \"b\", \"b\", \"b\", \"b\", \"b\"]",
+        14,
+        "{{date:-7}}",
+        "17:00",
+        "UTC"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__schedule_versions (id, household_a_id, household_a_agreed, household_b_agreed, status, agreed_at, updated_at, proposed_by, child_id, parent_a_id, parent_b_id, pattern, cycle, cycle_length, anchor_date, exchange_time, timezone) VALUES (?, ?, ?, ?, ?, datetime('now','-59 days'), datetime('now','-59 days'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "params": [
+        "perf-sch",
+        "perf-home",
+        1,
+        1,
+        "agreed",
+        "{{me}}",
+        "{{child}}",
+        "{{me}}",
+        "{{partner}}",
+        "alternating_weeks",
+        "[\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"b\", \"b\", \"b\", \"b\", \"b\", \"b\", \"b\"]",
+        14,
+        "{{date:-7}}",
+        "17:00",
+        "UTC"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-00",
+        "{{child}}",
+        "{{date:-7}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-01",
+        "{{child}}",
+        "{{date:-6}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-02",
+        "{{child}}",
+        "{{date:-5}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-03",
+        "{{child}}",
+        "{{date:-4}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-04",
+        "{{child}}",
+        "{{date:-3}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-05",
+        "{{child}}",
+        "{{date:-2}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-06",
+        "{{child}}",
+        "{{date:-1}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, from_parent_id, exchange_time, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-07",
+        "{{child}}",
+        "{{date:0}}",
+        "{{partner}}",
+        1,
+        "schedule",
+        "With Perf Partner",
+        "Exchange at 17:00",
+        "perf-sch",
+        "{{me}}",
+        "17:00"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-08",
+        "{{child}}",
+        "{{date:1}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-09",
+        "{{child}}",
+        "{{date:2}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-10",
+        "{{child}}",
+        "{{date:3}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-11",
+        "{{child}}",
+        "{{date:4}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-12",
+        "{{child}}",
+        "{{date:5}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-13",
+        "{{child}}",
+        "{{date:6}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, from_parent_id, exchange_time, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-14",
+        "{{child}}",
+        "{{date:7}}",
+        "{{me}}",
+        1,
+        "schedule",
+        "With Perf Admin",
+        "Exchange at 17:00",
+        "perf-sch",
+        "{{partner}}",
+        "17:00"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-15",
+        "{{child}}",
+        "{{date:8}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-16",
+        "{{child}}",
+        "{{date:9}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-17",
+        "{{child}}",
+        "{{date:10}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-18",
+        "{{child}}",
+        "{{date:11}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-19",
+        "{{child}}",
+        "{{date:12}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-20",
+        "{{child}}",
+        "{{date:13}}",
+        "{{me}}",
+        0,
+        "schedule",
+        "With Perf Admin",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, from_parent_id, exchange_time, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-21",
+        "{{child}}",
+        "{{date:14}}",
+        "{{partner}}",
+        1,
+        "schedule",
+        "With Perf Partner",
+        "Exchange at 17:00",
+        "perf-sch",
+        "{{me}}",
+        "17:00"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-22",
+        "{{child}}",
+        "{{date:15}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-23",
+        "{{child}}",
+        "{{date:16}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-24",
+        "{{child}}",
+        "{{date:17}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-25",
+        "{{child}}",
+        "{{date:18}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-26",
+        "{{child}}",
+        "{{date:19}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, subtitle, source_version_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-cd-27",
+        "{{child}}",
+        "{{date:20}}",
+        "{{partner}}",
+        0,
+        "schedule",
+        "With Perf Partner",
+        "Alternating weeks",
+        "perf-sch"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-72 hours'), ?)",
+      "params": [
+        "perf-msg-0",
+        "{{partner}}",
+        "{{me}}",
+        "Kid has a dentist appointment Thursday at 4.",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-63 hours'), ?)",
+      "params": [
+        "perf-msg-1",
+        "{{me}}",
+        "{{partner}}",
+        "Thanks, I will take them and send the paperwork.",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-54 hours'), ?)",
+      "params": [
+        "perf-msg-2",
+        "{{partner}}",
+        "{{me}}",
+        "Can you pack the swim bag for Saturday?",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-45 hours'), ?)",
+      "params": [
+        "perf-msg-3",
+        "{{me}}",
+        "{{partner}}",
+        "Done. Goggles are in the side pocket.",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-36 hours'), ?)",
+      "params": [
+        "perf-msg-4",
+        "{{partner}}",
+        "{{me}}",
+        "School photos are next Tuesday.",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-27 hours'), ?)",
+      "params": [
+        "perf-msg-5",
+        "{{me}}",
+        "{{partner}}",
+        "Got it, I will iron the shirt.",
+        "perf-coparent-session"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
+      "params": [
+        "perf-hn-0",
+        "{{child}}",
+        "{{date:1}}",
+        "items",
+        "Soccer cleats and shin guards are in the blue bag.",
+        "{{partner}}"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-2 days'))",
+      "params": [
+        "perf-hn-1",
+        "{{child}}",
+        "{{date:0}}",
+        "health",
+        "Allergy medicine each morning with breakfast.",
+        "{{me}}"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-3 days'))",
+      "params": [
+        "perf-hn-2",
+        "{{child}}",
+        "{{date:-2}}",
+        "school",
+        "Reading log is due Friday.",
+        "{{partner}}"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-4 days'))",
+      "params": [
+        "perf-hn-3",
+        "{{child}}",
+        "{{date:-5}}",
+        "items",
+        "Library books go back on Monday.",
+        "{{me}}"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','-1 days'), datetime('now','-1 days'))",
+      "params": [
+        "perf-swap",
+        "{{partner}}",
+        "{{me}}",
+        "{{child}}",
+        "{{date:10}}",
+        "{{date:12}}",
+        "{{partner}}",
+        "School play weekend",
+        "pending"
+      ]
+    },
+    {
+      "sql": "INSERT INTO app_co_parenting__swap_agreements (id, requester_id, responder_id, requester_agreed, responder_agreed, status, updated_at, child_id, start_date, end_date, to_parent_id, note) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-1 days'), ?, ?, ?, ?, ?)",
+      "params": [
+        "perf-swap",
+        "{{partner}}",
+        "{{me}}",
+        1,
+        0,
+        "pending",
+        "{{child}}",
+        "{{date:10}}",
+        "{{date:12}}",
+        "{{partner}}",
+        "School play weekend"
+      ]
+    }
+  ]
+}

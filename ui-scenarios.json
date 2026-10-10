@@ -82,7 +82,7 @@
         },
         {
           "action": "expectText",
-          "text": "Countersigned",
+          "text": "on one parent's signature",
           "as": "parent"
         },
         {

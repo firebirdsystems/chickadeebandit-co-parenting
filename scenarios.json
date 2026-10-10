@@ -807,6 +807,81 @@
           "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "dr-a", "rationale": "private argument" }] }
         }
       ]
+    },
+    {
+      "name": "a retried swap request does not duplicate, and the report's outcome comes from the countersigned agreement rather than the editable request",
+      "members": { "a": "adult", "b": "adult" },
+      "steps": [
+        {
+          "comment": "The app re-sends the SAME id when the requester's signature failed after the insert landed; DO NOTHING makes the second send a no-op instead of a second request.",
+          "action": "db", "as": "a",
+          "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?) ON CONFLICT (id) DO NOTHING",
+          "params": ["sw-retry", "{{a}}", "{{b}}", "child-1", "2026-02-01", "2026-02-03", "{{a}}", "school play", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db", "as": "a",
+          "sql": "INSERT INTO app_co_parenting__swap_requests (id, requester_id, responder_id, child_id, start_date, end_date, to_parent_id, note, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?) ON CONFLICT (id) DO NOTHING",
+          "params": ["sw-retry", "{{a}}", "{{b}}", "child-1", "2026-02-01", "2026-02-03", "{{a}}", "school play", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "db", "as": "b",
+          "sql": "SELECT id FROM app_co_parenting__swap_requests",
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "id": "sw-retry" }] }
+        },
+        {
+          "comment": "Locked by the hub; the request row is never told and still says pending. It also stays editable, so its terms are not the record either.",
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__swap_agreements (id, requester_id, responder_id, requester_agreed, responder_agreed, status, locked_at, updated_at, child_id, start_date, end_date, to_parent_id, note) VALUES (?, ?, ?, 1, 1, 'locked', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', 'child-1', '2026-02-01', '2026-02-03', ?, 'school play')",
+          "params": ["sw-retry", "{{a}}", "{{b}}", "{{a}}"]
+        },
+        {
+          "action": "db", "as": "a",
+          "sql": "UPDATE app_co_parenting__swap_requests SET end_date = '2026-02-20' WHERE id = 'sw-retry'",
+          "expect": { "status": 200 }
+        },
+        {
+          "comment": "The shape of the swap_requests report view: outcome and terms from the agreement, falling back to the request only where there is none.",
+          "action": "db", "as": "b",
+          "sql": "SELECT COALESCE(a.status, r.status) AS status, COALESCE(a.end_date, r.end_date) AS end_date, r.status AS request_status FROM app_co_parenting__swap_requests r LEFT JOIN app_co_parenting__swap_agreements a ON a.id = r.id WHERE r.created_at >= ? AND substr(r.created_at, 1, 10) <= substr(?, 1, 10) ORDER BY r.created_at",
+          "params": ["2026-01-01", "2026-01-01"],
+          "expect": { "status": 200, "rowCount": 1, "rowsContain": [{ "status": "locked", "end_date": "2026-02-03", "request_status": "pending" }] }
+        }
+      ]
+    },
+    {
+      "name": "the windowed reads of the projection are admitted for a child as well as a parent",
+      "members": { "a": "adult", "kid": "child" },
+      "granted": ["kid"],
+      "steps": [
+        {
+          "action": "seedRaw",
+          "sql": "INSERT INTO app_co_parenting__custody_days (id, child_id, day, parent_id, is_transition, source, title, updated_at, source_version_id, materializer_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          "params": ["d1", "{{kid}}", "2026-06-20", "{{a}}", 1, "cycle", "Sam → A", "2026-01-01T00:00:00Z", "v1", 1]
+        },
+        {
+          "comment": "manifest.preload.custody_days as the app posts it, :today resolved. Admission only — status, never row counts. seedRaw writes without the manifest's db_plaintext_columns, so a seeded `day` is stored encrypted here and no range comparison on it means anything in this harness; in production the hub's materializer is the only writer and passes them. What this pins is that the hub accepts each statement the app posts (the date arithmetic in particular) against an endpoint_only table, for the viewer with the least access.",
+          "action": "db", "as": "kid",
+          "sql": "SELECT * FROM app_co_parenting__custody_days WHERE day >= date(?, '-45 days') ORDER BY day",
+          "params": ["2026-06-30"],
+          "expect": { "status": 200 }
+        },
+        {
+          "comment": "Turning the grid back a month: the gap before what is loaded.",
+          "action": "db", "as": "kid",
+          "sql": "SELECT * FROM app_co_parenting__custody_days WHERE day >= ? AND day < ? ORDER BY day",
+          "params": ["2026-01-01", "2026-05-16"],
+          "expect": { "status": 200 }
+        },
+        {
+          "comment": "Old handoffs for filing old notes under — transitions only.",
+          "action": "db", "as": "a",
+          "sql": "SELECT * FROM app_co_parenting__custody_days WHERE is_transition = 1 AND day >= ? AND day < ? ORDER BY day",
+          "params": ["2026-01-01", "2026-05-16"],
+          "expect": { "status": 200 }
+        }
+      ]
     }
   ]
 }

@@ -30,6 +30,10 @@ import {
   pairingState, partitionMessagesBySession,
   CYCLE_PRESETS, nameForCycle, presetForCycle, cycleAnchorHint,
   weekdayOf, visitingWeekdays, formatWeekdaySpan,
+  withinEffectiveWindow, scheduleHasEnded, calendarCell, monthBounds,
+  SWAP_HORIZON_DAYS, swapIsStalled, swapStallReason, swapPartyIssue,
+  versionSignatures, childrenOpenForNewSchedule, scheduleProposalTerms,
+  parseCycleInput, fmtHandoffDay, timeZoneChoices, unilateralStance, timeZoneDefaultSource, scheduleSnapshot,
 } from "../src/logic.js";
 
 const PA = "parent-a";
@@ -1464,5 +1468,446 @@ describe("scheduleNoticeAudience", () => {
     expect(scheduleNoticeAudience([coParentA], "a")).toEqual([]);
     expect(scheduleNoticeAudience([], "a")).toEqual([]);
     expect(scheduleNoticeAudience(null, "a")).toEqual([]);
+  });
+});
+
+// ── The effective window ─────────────────────────────────────────────────────
+
+describe("a version's effective window", () => {
+  const ended = schedule({ effective_to: "2026-03-01" });
+  const future = schedule({ effective_from: "2026-06-01" });
+
+  it("resolves nobody outside the window, as the hub's projector does", () => {
+    // The bug: the grid ignored the window, so a schedule both parents had
+    // ended went on painting a full rotation a year later.
+    expect(effectiveForDate(ended, [], "2026-03-01").parent_id).toBe(PB);
+    expect(effectiveForDate(ended, [], "2026-03-02").parent_id).toBeNull();
+    expect(effectiveForDate(ended, [], "2027-03-01").parent_id).toBeNull();
+    expect(effectiveForDate(future, [], "2026-05-31").parent_id).toBeNull();
+    expect(effectiveForDate(future, [], "2026-06-01").parent_id).not.toBeNull();
+  });
+
+  it("does not let a swap resurrect a day outside the window", () => {
+    // The projector clamps to the window before it looks at exceptions.
+    const ov = [{ id: "o", child_id: "kid-1", start_date: "2026-03-05", end_date: "2026-03-06", parent_id: PA, created_at: "x" }];
+    expect(effectiveForDate(ended, ov, "2026-03-05")).toEqual({ parent_id: null, source: "schedule" });
+  });
+
+  it("is inclusive at both ends and open where a bound is absent", () => {
+    expect(withinEffectiveWindow(schedule(), "1999-01-01")).toBe(true);
+    expect(withinEffectiveWindow(ended, "2026-03-01")).toBe(true);
+    expect(withinEffectiveWindow(future, "2026-06-01")).toBe(true);
+    expect(withinEffectiveWindow(null, "2026-06-01")).toBe(false);
+  });
+
+  it("knows an ended schedule from one that merely has an end date", () => {
+    expect(scheduleHasEnded(ended, "2026-03-01")).toBe(false);   // its last day
+    expect(scheduleHasEnded(ended, "2026-03-02")).toBe(true);
+    expect(scheduleHasEnded(schedule(), "2030-01-01")).toBe(false);
+    expect(scheduleHasEnded(null, "2030-01-01")).toBe(false);
+  });
+
+  it("stops the preview at the end date too", () => {
+    const rows = buildCustodyDays([ended], [], { startDate: "2026-02-27", endDate: "2026-03-05" });
+    expect(rows.map((r) => r.day)).toEqual(["2026-02-27", "2026-02-28", "2026-03-01"]);
+  });
+});
+
+describe("calendarCell", () => {
+  const today = "2026-03-10";
+  const sch = schedule();
+  const record = new Map([
+    ["2026-03-02", { day: "2026-03-02", parent_id: "grandma", source: "cycle" }],
+    ["2026-03-03", { day: "2026-03-03", parent_id: PA, source: "exception" }],
+  ]);
+
+  it("draws a past day from the record, whoever the version in force names now", () => {
+    // Recomputing would say PB (2026-03-02 is in B's week); the record says who
+    // actually had the child, under whatever version applied then.
+    expect([PA, PB]).toContain(effectiveForDate(sch, [], "2026-03-02").parent_id);
+    expect(calendarCell(sch, [], record, "2026-03-02", today)).toEqual({ parent_id: "grandma", source: "record" });
+  });
+
+  it("marks a past day a countersigned swap moved", () => {
+    expect(calendarCell(sch, [], record, "2026-03-03", today).source).toBe("override");
+  });
+
+  it("leaves a past day with no row empty instead of inventing one", () => {
+    expect(calendarCell(sch, [], record, "2026-03-04", today)).toEqual({ parent_id: null, source: "record" });
+    expect(calendarCell(sch, [], null, "2026-03-04", today).parent_id).toBeNull();
+  });
+
+  it("computes today and the future from the agreed version, past any horizon", () => {
+    expect(calendarCell(sch, [], record, today, today)).toEqual(effectiveForDate(sch, [], today));
+    expect(calendarCell(sch, [], record, "2029-06-01", today)).toEqual(effectiveForDate(sch, [], "2029-06-01"));
+  });
+
+  it("draws nothing after an ended schedule's last day", () => {
+    const ended = schedule({ effective_to: "2026-03-12" });
+    expect(calendarCell(ended, [], record, "2026-03-12", today).parent_id).not.toBeNull();
+    expect(calendarCell(ended, [], record, "2026-03-13", today).parent_id).toBeNull();
+  });
+});
+
+describe("monthBounds", () => {
+  it("gives the first and last day, across leap years and year ends", () => {
+    expect(monthBounds(2026, 1)).toEqual({ first: "2026-02-01", last: "2026-02-28" });
+    expect(monthBounds(2028, 1)).toEqual({ first: "2028-02-01", last: "2028-02-29" });
+    expect(monthBounds(2026, 11)).toEqual({ first: "2026-12-01", last: "2026-12-31" });
+  });
+});
+
+// ── Swaps: horizon, parties, the stalled state ───────────────────────────────
+
+describe("validateSwap against the horizon and the schedule", () => {
+  const today = "2026-07-04";
+  const sch = schedule();
+  const base = {
+    requester_id: PA, responder_id: PB, child_id: "kid-1",
+    start_date: "2026-07-10", end_date: "2026-07-12", to_parent_id: PA,
+  };
+
+  it("accepts a swap that starts on the last projected day and refuses the day after", () => {
+    const edge = addDays(today, SWAP_HORIZON_DAYS);
+    expect(validateSwap({ ...base, start_date: edge, end_date: edge }, today).ok).toBe(true);
+    const beyond = addDays(edge, 1);
+    const refused = validateSwap({ ...base, start_date: beyond, end_date: beyond }, today);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain(String(SWAP_HORIZON_DAYS));
+    expect(refused.error).toContain(edge);
+  });
+
+  it("allows a swap that starts inside the horizon and runs past it", () => {
+    expect(validateSwap({ ...base, start_date: addDays(today, 119), end_date: addDays(today, 130) }, today).ok).toBe(true);
+  });
+
+  it("refuses a responder who is not the child's other parent", () => {
+    // The app's own refusal — the hub would lock this swap (see swapPartyIssue).
+    const v = validateSwap({ ...base, responder_id: "step-parent" }, today, { schedule: sch });
+    expect(v.ok).toBe(false);
+    expect(v.error).toMatch(/two parents/);
+  });
+
+  it("refuses a requester who is not a parent on the schedule, and a third-party recipient", () => {
+    expect(validateSwap({ ...base, requester_id: "step-parent" }, today, { schedule: sch }).ok).toBe(false);
+    expect(validateSwap({ ...base, to_parent_id: "grandma" }, today, { schedule: sch }).ok).toBe(false);
+  });
+
+  it("refuses a swap with no agreed schedule, an ended one, or dates outside it", () => {
+    expect(validateSwap(base, today, { schedule: null }).ok).toBe(false);
+    expect(validateSwap(base, today, { schedule: schedule({ effective_to: "2026-07-01" }) }).ok).toBe(false);
+    expect(validateSwap(base, today, { schedule: schedule({ effective_to: "2026-07-11" }) }).ok).toBe(false);
+    expect(validateSwap(base, today, { schedule: sch })).toEqual({ ok: true });
+  });
+
+  it("checks nothing about the schedule when none is passed", () => {
+    expect(validateSwap({ ...base, responder_id: "anyone" }, today)).toEqual({ ok: true });
+  });
+});
+
+describe("swapPartyIssue", () => {
+  const sch = schedule();
+  const swap = { requester_id: PA, responder_id: PB, to_parent_id: PB };
+
+  it("passes the two parents in either direction", () => {
+    expect(swapPartyIssue(swap, sch)).toBeNull();
+    expect(swapPartyIssue({ requester_id: PB, responder_id: PA, to_parent_id: PA }, sch)).toBeNull();
+  });
+
+  it("names a swap one parent made with somebody else", () => {
+    expect(swapPartyIssue({ ...swap, responder_id: "step-parent" }, sch)).toMatch(/two parents/);
+    expect(swapPartyIssue({ requester_id: "kid-a", responder_id: "kid-b", to_parent_id: PA }, sch)).toMatch(/two parents/);
+    expect(swapPartyIssue({ requester_id: PA, responder_id: PA, to_parent_id: PA }, sch)).toMatch(/two parents/);
+  });
+
+  it("names a swap that hands the child to a third person", () => {
+    expect(swapPartyIssue({ ...swap, to_parent_id: "grandma" }, sch)).toMatch(/one of the child's two parents/);
+  });
+
+  it("has nothing to check against without a schedule", () => {
+    expect(swapPartyIssue(swap, null)).toMatch(/no agreed schedule/);
+  });
+});
+
+describe("a swap both parents signed that never locked", () => {
+  const today = "2026-07-04";
+  const stalled = {
+    status: "pending", requester_id: PA, responder_id: PB, requester_agreed: 1, responder_agreed: 1,
+    start_date: "2026-07-10", end_date: "2026-07-12",
+  };
+
+  it("is recognised only with both signatures on a pending row", () => {
+    expect(swapIsStalled(stalled)).toBe(true);
+    expect(swapIsStalled({ ...stalled, responder_agreed: 0 })).toBe(false);
+    expect(swapIsStalled({ ...stalled, status: "locked" })).toBe(false);
+    expect(swapIsStalled(null)).toBe(false);
+    // The state the ordinary buttons cannot reach, which is why it needs naming.
+    expect(canMemberAgreeToSwap(stalled, PA)).toBe(false);
+    expect(canMemberAgreeToSwap(stalled, PB)).toBe(false);
+  });
+
+  it("says why, from the dates", () => {
+    expect(swapStallReason(stalled, today)).toBe("retry");
+    expect(swapStallReason({ ...stalled, start_date: "2026-07-01", end_date: "2026-07-03" }, today)).toBe("past");
+    expect(swapStallReason({ ...stalled, start_date: "2026-07-01", end_date: "2026-07-04" }, today)).toBe("retry");
+    const far = addDays(today, SWAP_HORIZON_DAYS + 1);
+    expect(swapStallReason({ ...stalled, start_date: far, end_date: far }, today)).toBe("too_far");
+    expect(swapStallReason({ ...stalled, start_date: far, end_date: far }, addDays(today, 1))).toBe("retry");
+  });
+
+  it("has no reason for a swap that is not stalled", () => {
+    expect(swapStallReason({ ...stalled, responder_agreed: 0 }, today)).toBeNull();
+  });
+});
+
+// ── Versions: unsigned rows, signatures, who may start a schedule ────────────
+
+describe("mergeScheduleVersion on a row nobody has signed", () => {
+  const amendment = {
+    id: "v9", child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", pattern: "two_two_three",
+    cycle: '["a","b"]', anchor_date: "2026-03-02", proposed_by: "mom", household_b_id: "home-b",
+  };
+  // What the hub writes the moment the row is created: the id, the init columns
+  // (both households, the child, the base version), flags at 0 — and no terms.
+  const bootstrapped = {
+    id: "v9", household_a_id: "home-a", household_b_id: "home-b", child_id: "kid", base_version_id: null,
+    household_a_agreed: 0, household_b_agreed: 0, status: "pending",
+    pattern: null, cycle: null, anchor_date: null, parent_a_id: null, parent_b_id: null, proposed_by: null,
+  };
+
+  it("keeps the amendment's terms rather than reading nulls as a snapshot", () => {
+    const merged = mergeScheduleVersion(amendment, bootstrapped);
+    expect(merged.status).toBe("pending");
+    expect(merged.pattern).toBe("two_two_three");
+    expect(merged.anchor_date).toBe("2026-03-02");
+    expect(merged.parent_a_id).toBe("mom");
+    expect(merged.proposed_by).toBe("mom");
+  });
+
+  it("still takes the snapshot the moment one is bound", () => {
+    const merged = mergeScheduleVersion(amendment, {
+      ...bootstrapped, household_a_agreed: 1, pattern: "custom", cycle: '["b","a"]', anchor_date: "2026-04-06",
+      parent_a_id: "mom", parent_b_id: "dad", proposed_by: "mom",
+    });
+    expect(merged.pattern).toBe("custom");
+    expect(merged.anchor_date).toBe("2026-04-06");
+  });
+});
+
+describe("versionSignatures", () => {
+  it("is 'both' only with both signatures on the row", () => {
+    expect(versionSignatures({ status: "agreed", household_a_agreed: 1, household_b_agreed: 1 })).toBe("both");
+  });
+
+  it("is 'one' for a version the hub locked on the proposer's signature alone", () => {
+    // No second party existed, so nothing was countersigned — and the app must
+    // not say it was, however `agreed` the status reads.
+    expect(versionSignatures({ status: "agreed", household_a_agreed: 1, household_b_agreed: 0 })).toBe("one");
+    expect(versionSignatures(null)).toBe("one");
+  });
+
+  it("carries the second seat through the merge, with or without an amendment row", () => {
+    expect(mergeScheduleVersion({ id: "v" }, { id: "v", status: "agreed", cycle: '["a"]', household_b_id: null }).household_b_id).toBeNull();
+    expect(mergeScheduleVersion({ id: "v", household_b_id: "home-b" }, undefined).household_b_id).toBe("home-b");
+  });
+});
+
+describe("childrenOpenForNewSchedule", () => {
+  const kids = [{ id: "k1" }, { id: "k2" }, { id: "k3" }, { id: "k4" }, { id: "k5" }];
+  const versions = [
+    { child_id: "k1", status: "agreed" },
+    { child_id: "k2", status: "pending" },
+    { child_id: "k3", status: "draft" },       // proposed, signature never landed
+    { child_id: "k5", status: "withdrawn" },
+    { child_id: "k5", status: "superseded" },
+  ];
+
+  it("offers only children with no schedule, proposal or draft", () => {
+    expect(childrenOpenForNewSchedule(kids, versions, [{ child_id: "k4" }]).map((k) => k.id)).toEqual(["k5"]);
+  });
+
+  it("offers everyone in a new space and tolerates missing lists", () => {
+    expect(childrenOpenForNewSchedule(kids, null, null)).toHaveLength(5);
+    expect(childrenOpenForNewSchedule(null, versions, [])).toEqual([]);
+  });
+});
+
+// ── One definition of a proposal's terms ─────────────────────────────────────
+
+describe("scheduleProposalTerms", () => {
+  const fields = {
+    child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", pattern: "two_two_three",
+    cycle: JSON.stringify(compileCycle("two_two_three")), cycle_length: 14, anchor_date: "2026-03-02",
+    exchange_time: "17:00", timezone: "America/Denver", rationale: "closer to school", base_version_id: "v1",
+  };
+
+  it("builds the same terms from the form as from a saved draft of the same fields", () => {
+    // The form's read carries bookkeeping the draft row does not, and the draft
+    // row carries columns the form does not; neither may reach the proposal.
+    const form = { ...fields, cycleError: null, cycleTyped: false };
+    const draft = { ...fields, id: "dr", author_id: "mom", created_at: "x", updated_at: "y" };
+    expect(scheduleProposalTerms(form, "UTC")).toEqual(scheduleProposalTerms(draft, "UTC"));
+    expect(draftProposalTerms).toBe(scheduleProposalTerms);
+  });
+
+  it("never carries an end date forward from the version being amended", () => {
+    // The bug: amending an ENDED schedule inherited its past end date, so the
+    // new rotation both parents countersigned published no days at all.
+    const ended = { ...fields, id: "v1", effective_from: "2026-01-01", effective_to: "2026-02-01" };
+    const terms = scheduleProposalTerms({ ...ended, base_version_id: ended.id }, "UTC");
+    expect(terms.effective_to).toBeNull();
+    expect(terms.effective_from).toBeNull();
+    // And restarting it unchanged is a real change, not a no-op to refuse.
+    expect(describeScheduleChange(ended, terms)).toBe("when it starts and when it ends");
+  });
+});
+
+// ── Typing a cycle ───────────────────────────────────────────────────────────
+
+describe("parseCycleInput", () => {
+  it("reads commas, spaces and capitals alike", () => {
+    expect(parseCycleInput("a,a,b,b")).toEqual({ cycle: ["a", "a", "b", "b"], error: null });
+    expect(parseCycleInput(" A, a  b,B, ")).toEqual({ cycle: ["a", "a", "b", "b"], error: null });
+  });
+
+  it("names the wrong letter and where it is, instead of dropping the day", () => {
+    // normalizeCycle would have returned 13 days here and said nothing.
+    const typed = "a,a,v,b,a,a,a,b,b,a,a,b,b,b";
+    expect(normalizeCycle(typed.split(","))).toHaveLength(13);
+    const parsed = parseCycleInput(typed);
+    expect(parsed.cycle).toEqual([]);
+    expect(parsed.error).toContain('"v"');
+    expect(parsed.error).toContain("Day 3");
+  });
+
+  it("refuses letters run together, which are not a cycle either", () => {
+    expect(parseCycleInput("aabb").error).toContain('"aabb"');
+  });
+
+  it("asks for a cycle when there is none", () => {
+    expect(parseCycleInput("").error).toMatch(/custom cycle/);
+    expect(parseCycleInput(" , ,").error).toMatch(/custom cycle/);
+    expect(parseCycleInput(null).cycle).toEqual([]);
+  });
+});
+
+// ── Dates on the record ──────────────────────────────────────────────────────
+
+describe("fmtHandoffDay", () => {
+  const today = "2026-10-10";   // a Saturday
+  const fmt = (day) => fmtHandoffDay(day, today, "en-US");
+
+  it("shortens only the coming week to a weekday", () => {
+    expect(fmt("2026-10-10")).toBe("Sat");
+    expect(fmt("2026-10-16")).toBe("Fri");
+    expect(fmt("2026-10-17")).toBe("Sat, Oct 17");
+  });
+
+  it("always dates a day in the past", () => {
+    // The bug: `day - today < 7 days` is true of every past day, so a handoff
+    // from months ago read as a bare "Fri".
+    expect(fmt("2026-10-09")).toBe("Fri, Oct 9");
+    expect(fmt("2026-07-10")).toBe("Fri, Jul 10");
+  });
+
+  it("adds the year when it is not this one", () => {
+    expect(fmt("2025-10-10")).toBe("Fri, Oct 10, 2025");
+    expect(fmt("2027-01-01")).toBe("Fri, Jan 1, 2027");
+  });
+
+  it("hands back what it cannot read", () => {
+    expect(fmt("soon")).toBe("soon");
+    expect(fmt(null)).toBe("");
+  });
+});
+
+// ── The agreed timezone ──────────────────────────────────────────────────────
+
+describe("unilateralStance", () => {
+  const oneSignature = {
+    status: "agreed", household_a_agreed: 1, household_b_agreed: 0,
+    parent_a_id: "mom", parent_b_id: "dad", proposed_by: "mom",
+  };
+
+  it("names the other parent on a one-signature version as the one who never signed", () => {
+    expect(unilateralStance(oneSignature, "dad")).toBe("unsigned_parent");
+    expect(unilateralStance(oneSignature, "mom")).toBe("signer");
+  });
+
+  it("says nothing to an adult who is not one of the version's two parents", () => {
+    expect(unilateralStance(oneSignature, "step")).toBeNull();
+  });
+
+  it("says nothing once both parents have signed, or with nothing to read", () => {
+    expect(unilateralStance({ ...oneSignature, household_b_agreed: 1 }, "dad")).toBeNull();
+    expect(unilateralStance(null, "dad")).toBeNull();
+    expect(unilateralStance(oneSignature, undefined)).toBeNull();
+  });
+});
+
+describe("scheduleSnapshot", () => {
+  it("names every frozen term, with null for the ones the version leaves empty", () => {
+    const snapshot = scheduleSnapshot({
+      id: "v1", status: "agreed", household_a_agreed: 1, agreed_at: "2026-10-01T00:00:00Z",
+      proposed_by: "mom", child_id: "kid", parent_a_id: "mom", parent_b_id: "dad",
+      pattern: "alternating_weeks", cycle: '["a","b"]', cycle_length: 2, anchor_date: "2026-03-02",
+      timezone: "America/Denver",
+    });
+    expect(snapshot).toEqual({
+      proposed_by: "mom", child_id: "kid", parent_a_id: "mom", parent_b_id: "dad",
+      pattern: "alternating_weeks", cycle: '["a","b"]', cycle_length: 2, anchor_date: "2026-03-02",
+      exchange_time: null, timezone: "America/Denver", effective_from: null, effective_to: null,
+      rationale: null, base_version_id: null,
+    });
+  });
+
+  it("carries the date of a signature added after the version took effect through the merge", () => {
+    const agreement = { id: "v", status: "agreed", cycle: '["a"]', countersigned_at: "2026-11-02T10:00:00Z" };
+    expect(mergeScheduleVersion({ id: "v" }, agreement).countersigned_at).toBe("2026-11-02T10:00:00Z");
+    expect(mergeScheduleVersion({ id: "v" }, { ...agreement, countersigned_at: undefined }).countersigned_at).toBeNull();
+  });
+});
+
+describe("timeZoneDefaultSource", () => {
+  it("is 'device' only when the space had nothing but UTC and the device supplied the default", () => {
+    expect(timeZoneDefaultSource({ space: "UTC", device: "America/Denver" })).toBe("device");
+    expect(timeZoneDefaultSource({ space: null, device: "America/Denver" })).toBe("device");
+  });
+
+  it("is null when the zone came from the space, from the row being edited, or from nowhere", () => {
+    expect(timeZoneDefaultSource({ space: "America/New_York", device: "America/Denver" })).toBeNull();
+    expect(timeZoneDefaultSource({ current: "UTC", space: "UTC", device: "America/Denver" })).toBeNull();
+    expect(timeZoneDefaultSource({ space: "UTC", device: null })).toBeNull();
+    expect(timeZoneDefaultSource({ space: "UTC", device: "UTC" })).toBeNull();
+  });
+
+  it("agrees with timeZoneChoices about which zone that default is", () => {
+    const args = { space: "UTC", device: "America/Denver" };
+    expect(timeZoneChoices(args).selected).toBe("America/Denver");
+    expect(timeZoneDefaultSource(args)).toBe("device");
+  });
+});
+
+describe("timeZoneChoices", () => {
+  it("offers the device's zone when the space has only UTC to suggest, and starts on it", () => {
+    // The bug: a tenant with no timezone reports UTC, the form offered the
+    // tenant's zone and UTC, and so every schedule there was frozen to UTC.
+    expect(timeZoneChoices({ space: "UTC", device: "America/Denver" }))
+      .toEqual({ zones: ["UTC", "America/Denver"], selected: "America/Denver" });
+  });
+
+  it("starts on the space's zone when it has a real one, still offering the device's", () => {
+    expect(timeZoneChoices({ space: "America/New_York", device: "America/Los_Angeles" }))
+      .toEqual({ zones: ["America/New_York", "America/Los_Angeles", "UTC"], selected: "America/New_York" });
+  });
+
+  it("never moves a zone that is already a term of the version or draft", () => {
+    expect(timeZoneChoices({ current: "UTC", space: "America/Denver", device: "Europe/Paris" }).selected).toBe("UTC");
+    expect(timeZoneChoices({ current: "Asia/Tokyo", space: "UTC", device: null }).zones).toEqual(["Asia/Tokyo", "UTC"]);
+  });
+
+  it("falls back to UTC only when there is truly nothing else", () => {
+    expect(timeZoneChoices({ space: "UTC", device: null })).toEqual({ zones: ["UTC"], selected: "UTC" });
+    expect(timeZoneChoices()).toEqual({ zones: ["UTC"], selected: "UTC" });
   });
 });

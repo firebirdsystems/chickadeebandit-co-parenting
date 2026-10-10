@@ -1,0 +1,12 @@
+-- When the second parent signed a schedule that was already in force.
+--
+-- A schedule proposed while only one parent has joined takes effect on that
+-- parent's signature alone: there is nobody else to ask. The parent who joins
+-- later can now add their signature to it (`late_signature` in the manifest),
+-- and this is when they did — kept apart from `agreed_at`, which stays the
+-- moment the schedule took effect, so the record never implies both parents
+-- had signed from the start.
+--
+-- NULL for every version both parents signed before it took effect, and for
+-- every version still carrying one signature.
+ALTER TABLE app_co_parenting__schedule_versions ADD COLUMN countersigned_at TEXT;

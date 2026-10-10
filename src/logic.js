@@ -415,6 +415,32 @@ export function normalizeCycle(cycle) {
   return arr.filter((c) => c === "a" || c === "b");
 }
 
+/**
+ * Read a hand-typed custom cycle ("a,a,b,b") strictly.
+ *
+ * normalizeCycle is right for STORED cycles — it is lenient about what a row
+ * holds — and wrong for typing: it drops anything that is not 'a' or 'b', so
+ * "a,a,v,b" quietly became a three-day rotation instead of an error. A cycle one
+ * day short is a different schedule that drifts a day every time it repeats,
+ * and nothing downstream can tell it was a typo.
+ *
+ * Commas and whitespace both separate, case is ignored, and empty entries (a
+ * trailing comma, a doubled one) are skipped.
+ * → { cycle: ['a','b',…], error: null } or { cycle: [], error: "…" }
+ */
+export function parseCycleInput(text) {
+  const tokens = String(text ?? "").split(/[\s,]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (!tokens.length) return { cycle: [], error: "Enter a custom cycle like a,a,b,b." };
+  const at = tokens.findIndex((t) => t !== "a" && t !== "b");
+  if (at !== -1) {
+    return {
+      cycle: [],
+      error: `Day ${at + 1} of the cycle is "${tokens[at]}" — each day must be a or b, separated by commas.`,
+    };
+  }
+  return { cycle: tokens, error: null };
+}
+
 // ── Overrides ───────────────────────────────────────────────────────────────
 
 /**
@@ -496,12 +522,112 @@ export function canMemberAgreeToSwap(swap, memberId) {
 }
 
 /**
+ * Whether a date falls inside a version's `effective_from`..`effective_to`
+ * window (both inclusive, either may be absent).
+ *
+ * The hub's projector clamps to this window BEFORE it looks at the cycle or at
+ * any swap, so a day outside it has no custody row at all — not a rotation day,
+ * not an excepted one. Anything here that resolved such a day anyway would be
+ * the app drawing a schedule the server does not publish.
+ */
+export function withinEffectiveWindow(schedule, dateStr) {
+  if (!schedule) return false;
+  if (schedule.effective_from && String(dateStr) < String(schedule.effective_from)) return false;
+  if (schedule.effective_to && String(dateStr) > String(schedule.effective_to)) return false;
+  return true;
+}
+
+/**
+ * True once a version's end date is behind `todayStr`.
+ *
+ * A retired schedule stays `agreed` — retirement is an amendment that adds an
+ * end date, never a status — so "is there an agreed version" and "is there a
+ * schedule running" are different questions, and only this answers the second.
+ */
+export function scheduleHasEnded(schedule, todayStr) {
+  return !!schedule?.effective_to && !!todayStr && String(schedule.effective_to) < String(todayStr);
+}
+
+/**
+ * How far ahead a swap can be countersigned, in days from today.
+ *
+ * Not a preference: it is `cycle_projection.horizon_days` in manifest.json. The
+ * hub refuses to lock a swap that moves no projected day, and it only projects
+ * this far, so a swap starting beyond it can be requested and can never be
+ * agreed. The app cannot read its own manifest at runtime, so the number lives
+ * here once and the manifest test pins the two equal.
+ */
+export const SWAP_HORIZON_DAYS = 120;
+
+/**
+ * A swap both parents have signed that is nevertheless still pending.
+ *
+ * It should not exist, and it does: the hub records a signature BEFORE it works
+ * out whether the lock can be applied, so a countersignature it then refuses —
+ * the dates lie beyond the projection horizon, or have already passed — leaves
+ * both flags set on a row that never locked. Nothing retries it, and with both
+ * flags set neither parent is offered "Agree" again, so without naming this
+ * state the request simply sits there with no way forward and no way out.
+ */
+export function swapIsStalled(swap) {
+  return !!swap && swap.status === "pending" && !!swap.requester_agreed && !!swap.responder_agreed;
+}
+
+/**
+ * Why a stalled swap did not take effect, as seen from `todayStr`:
+ *
+ *   "past"    — its last day is behind us; it can only be withdrawn
+ *   "too_far" — it starts beyond the horizon; it can be confirmed once it is
+ *               within `horizonDays`, or withdrawn
+ *   "retry"   — the dates are projectable now, so confirming again should lock
+ *
+ * @returns {"past"|"too_far"|"retry"|null} null when the swap is not stalled
+ */
+export function swapStallReason(swap, todayStr, horizonDays = SWAP_HORIZON_DAYS) {
+  if (!swapIsStalled(swap)) return null;
+  if (!swap.start_date || !swap.end_date) return "retry";
+  if (toDayNumber(swap.end_date) < toDayNumber(todayStr)) return "past";
+  if (toDayNumber(swap.start_date) > toDayNumber(todayStr) + horizonDays) return "too_far";
+  return "retry";
+}
+
+/**
+ * What is wrong with a swap's PARTIES, as a sentence, or null when they are the
+ * child's two parents.
+ *
+ * A swap is an exception to an agreement between two specific people — the
+ * `parent_a_id` and `parent_b_id` of the child's agreed version — so those are
+ * the only two who can make one. This is the app's check, and it is NOT the
+ * enforcement: `swap_requests` is `party_scoped` and the agreement runs in
+ * `members` mode, so the hub will lock a swap between the requester and
+ * whichever member the request names. Until the hub can pin an exception's
+ * parties to the version it excepts, this keeps the app from ever CREATING or
+ * COUNTERSIGNING such a swap, and makes one created some other way say so on
+ * its face rather than read as an ordinary confirmed swap.
+ */
+export function swapPartyIssue(swap, schedule) {
+  if (!swap) return "There is no swap to check.";
+  if (!schedule) return "This child has no agreed schedule, so there is nothing for a swap to change.";
+  const parents = [schedule.parent_a_id, schedule.parent_b_id];
+  if (!parents.includes(swap.requester_id) || !parents.includes(swap.responder_id)
+    || swap.requester_id === swap.responder_id) {
+    return "A swap has to be agreed between the child's two parents on the schedule.";
+  }
+  if (swap.to_parent_id && !parents.includes(swap.to_parent_id)) {
+    return "A swap can only move a day to one of the child's two parents on the schedule.";
+  }
+  return null;
+}
+
+/**
  * Effective parent id for a child on a date, applying overrides on top of the
  * base rotation. Later-created overrides win when ranges overlap. `overrides`
  * may include entries for other children; they're filtered by schedule.child_id.
+ * A date outside the version's effective window resolves to nobody.
  * Returns { parent_id, source: 'schedule' | 'override', override_id? }.
  */
 export function effectiveForDate(schedule, overrides, dateStr) {
+  if (!withinEffectiveWindow(schedule, dateStr)) return { parent_id: null, source: "schedule" };
   const day = toDayNumber(dateStr);
   let winner = null;
   for (const ov of overrides || []) {
@@ -512,6 +638,52 @@ export function effectiveForDate(schedule, overrides, dateStr) {
   if (winner) return { parent_id: winner.parent_id, source: "override", override_id: winner.id };
   return { parent_id: baseParentForDate(schedule, dateStr), source: "schedule" };
 }
+
+/**
+ * What one cell of the month grid should show.
+ *
+ * Two sources, split at today, and the split is the point:
+ *
+ *   - a day BEHIND today comes from `custody_days` — the record of what was
+ *     actually published for that day. Recomputing it from the version in force
+ *     now would repaint every past month the moment an amendment changed the
+ *     cycle or the anchor, and contradict the custody report built from the
+ *     same rows. A past day with no row is drawn empty, because that is what
+ *     the record says.
+ *   - today and the future come from the agreed version (inside its effective
+ *     window) plus locked swaps — the same arithmetic the hub projects, which is
+ *     what lets the grid reach past the projection horizon.
+ *
+ * `recordByDay` is a Map of day → custody_days row for this child.
+ * → { parent_id, source: 'schedule' | 'override' | 'record' }
+ */
+export function calendarCell(schedule, overrides, recordByDay, dateStr, todayStr) {
+  if (todayStr && String(dateStr) < String(todayStr)) {
+    const row = recordByDay?.get(dateStr);
+    if (!row) return { parent_id: null, source: "record" };
+    return { parent_id: row.parent_id ?? null, source: row.source === "override" || row.source === "exception" ? "override" : "record" };
+  }
+  return effectiveForDate(schedule, overrides, dateStr);
+}
+
+/** First and last day of a calendar month ('YYYY-MM-DD'); `month` is 0-based. */
+export function monthBounds(year, month) {
+  const first = `${year}-${String(month + 1).padStart(2, "0")}-01`;
+  const next = month === 11 ? `${year + 1}-01-01` : `${year}-${String(month + 2).padStart(2, "0")}-01`;
+  return { first, last: addDays(next, -1) };
+}
+
+/**
+ * How far behind today the first-render read of `custody_days` reaches.
+ *
+ * The table keeps every published day for as long as retention allows, so an
+ * unbounded read grows by a row per child per day for ever. Six weeks back
+ * covers the month on screen at launch and the recent handoffs notes hang off;
+ * anything older is fetched when the grid is actually turned to it.
+ * manifest.preload carries the same number in its SQL text — the manifest test
+ * pins the two together.
+ */
+export const CUSTODY_LOOKBACK_DAYS = 45;
 
 /**
  * Day-by-day assignments for [startDate, endDate] inclusive.
@@ -685,6 +857,60 @@ export function nextTransition(custodyDays, fromDate, childId) {
   return best;
 }
 
+/**
+ * A custody day for display, relative to `todayStr`.
+ *
+ *   within the coming week   "Fri"
+ *   any other day this year  "Fri, Aug 8"
+ *   another year             "Fri, Aug 8, 2025"
+ *
+ * Only an UPCOMING day may lose its date. The bare weekday is a shorthand for
+ * "this coming Friday", and the old test for it (`day - today < 7 days`) was
+ * true of every day in the past as well, so a handoff from months ago read as
+ * just "Fri" on a record whose whole purpose is to say when.
+ *
+ * Formatted in UTC from the date string itself, so the label can never slip a
+ * day in a timezone behind Greenwich.
+ */
+export function fmtHandoffDay(day, todayStr, locale = undefined) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day ?? ""))) return String(day ?? "");
+  const date = new Date(toDayNumber(day) * 86400000);
+  const ahead = todayStr ? daysBetween(todayStr, day) : null;
+  if (ahead !== null && ahead >= 0 && ahead < 7) {
+    return date.toLocaleDateString(locale, { weekday: "short", timeZone: "UTC" });
+  }
+  const sameYear = todayStr ? String(day).slice(0, 4) === String(todayStr).slice(0, 4) : false;
+  return date.toLocaleDateString(locale, {
+    weekday: "short", month: "short", day: "numeric", timeZone: "UTC",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+/**
+ * The timezones the schedule form offers, and the one it starts on.
+ *
+ * The zone is an agreed term — it decides whose midnight ends a custody day —
+ * so the choice has to be a real one. A tenant that has never set a timezone
+ * reports "UTC", and when the form offered only the tenant's zone and UTC that
+ * meant a single option: every schedule in such a space was frozen to UTC with
+ * nobody having chosen it, and the hub's "today" for that schedule then rolled
+ * over in the middle of the afternoon.
+ *
+ * So the proposer's own device zone is offered as well, and is the default
+ * when the tenant has nothing better than UTC to suggest. It is only ever a
+ * suggestion: the other parent reads the zone on the proposal and countersigns
+ * it, or does not.
+ *
+ * `current` is the zone already on the version or draft being edited, which
+ * always wins the default.
+ * → { zones: string[], selected: string }
+ */
+export function timeZoneChoices({ current = null, space = null, device = null } = {}) {
+  const zones = [...new Set([current, space, device, "UTC"].filter(Boolean))];
+  const selected = current || (space && space !== "UTC" ? space : device || space || "UTC");
+  return { zones, selected };
+}
+
 // ── Handoff notes ↔ custody transitions ─────────────────────────────────────
 //
 // Notes are anchored by DATE (`note_date`), not by a foreign key to a
@@ -819,8 +1045,15 @@ export function soleCoParentCandidate(adultMembers, meId) {
  */
 export function mergeScheduleVersion(amendment = {}, agreement) {
   const status = agreement?.status ?? "draft";
+  // Bound means the hub has frozen terms onto the agreement row, and the test
+  // for that has to be a column ONLY the freeze writes. `child_id` is not one:
+  // the hub copies it (with the two households and the base version) the moment
+  // the row is created, before anyone has signed. A row in that state — created
+  // by a signature the hub then refused — has a child and no terms, and reading
+  // it as bound replaced every real term with null: a proposal card saying
+  // "Not filled in yet" over a perfectly complete amendment.
   const bound = !!agreement
-    && ["child_id", "pattern", "cycle", "anchor_date"].some((column) => agreement[column] != null);
+    && ["pattern", "cycle", "anchor_date"].some((column) => agreement[column] != null);
   const terms = bound ? {
     child_id: agreement.child_id,
     parent_a_id: agreement.parent_a_id,
@@ -842,10 +1075,93 @@ export function mergeScheduleVersion(amendment = {}, agreement) {
     ...terms,
     id: agreement?.id ?? amendment.id,
     status,
+    // Which seats exist, as opposed to which have signed: an empty second seat
+    // is how a version agreed on one signature is told from one both signed.
+    household_b_id: agreement?.household_b_id ?? amendment.household_b_id ?? null,
     household_a_agreed: agreement?.household_a_agreed ? 1 : 0,
     household_b_agreed: agreement?.household_b_agreed ? 1 : 0,
     agreed_at: agreement?.agreed_at ?? null,
+    // Set only when the second parent signed AFTER the version took effect.
+    countersigned_at: agreement?.countersigned_at ?? null,
   };
+}
+
+/**
+ * The terms the hub froze onto an agreed version — the manifest's
+ * `snapshot_columns`, pinned to it by a manifest test.
+ *
+ * Signing a version that is already in force means naming these back to the
+ * hub exactly (`expected_snapshot`): the terms were bound by the other parent,
+ * so repeating them is the only proof that this parent read what they sign.
+ */
+export const SCHEDULE_SNAPSHOT_COLUMNS = [
+  "proposed_by", "child_id", "parent_a_id", "parent_b_id", "pattern", "cycle",
+  "cycle_length", "anchor_date", "exchange_time", "timezone", "effective_from",
+  "effective_to", "rationale", "base_version_id",
+];
+
+export function scheduleSnapshot(version) {
+  return Object.fromEntries(SCHEDULE_SNAPSHOT_COLUMNS.map((column) => [column, version?.[column] ?? null]));
+}
+
+/**
+ * How many parents actually signed an agreed version: "both" or "one".
+ *
+ * The hub locks a proposal on the proposer's signature alone when there is no
+ * second party to ask — a household install, or a co-parenting space the other
+ * parent has not joined yet. Such a version is in force, and it was NOT
+ * countersigned; the app must never say it was. Read from the signatures on
+ * the row, never from the status, which is `agreed` either way.
+ */
+export function versionSignatures(version) {
+  return version?.household_a_agreed && version?.household_b_agreed ? "both" : "one";
+}
+
+/**
+ * Where a member stands on a version that is in force on one signature:
+ * "signer" (it is theirs), "unsigned_parent" (they are the other parent on it
+ * and never signed), or null (countersigned, or not one of its two parents).
+ *
+ * The unsigned parent is the one person such a version can surprise: it took
+ * effect before they were here, so they never saw it as a proposal. They are
+ * told so, and pointed at the one remedy that exists — proposing a change.
+ */
+export function unilateralStance(version, memberId) {
+  if (!version || !memberId || versionSignatures(version) === "both") return null;
+  if (version.proposed_by === memberId) return "signer";
+  return version.parent_a_id === memberId || version.parent_b_id === memberId ? "unsigned_parent" : null;
+}
+
+/**
+ * Why the schedule form's timezone is not simply the space's, for the hint
+ * under the field: "device" when it was taken from the proposer's own device
+ * because the space had only UTC to offer, otherwise null.
+ *
+ * A zone nobody chose is still an agreed term once signed, so the proposer is
+ * told where the default came from before they send it.
+ */
+export function timeZoneDefaultSource({ current = null, space = null, device = null } = {}) {
+  if (current || (space && space !== "UTC")) return null;
+  return device && device !== "UTC" ? "device" : null;
+}
+
+/**
+ * The children a brand-new schedule can still be started for.
+ *
+ * A child who already has an agreed version, an open proposal, or this
+ * parent's own draft is amended from their own row, where the form knows what
+ * it is amending. Offering them under "Add child" as well produced a proposal
+ * with no base version, which the hub refuses the moment its proposer signs it
+ * (there is already a version in force) — after the proposal row was written.
+ */
+export function childrenOpenForNewSchedule(children, versions, drafts) {
+  const taken = new Set([
+    ...(versions || [])
+      .filter((v) => v.status === "agreed" || v.status === "pending" || v.status === "draft")
+      .map((v) => v.child_id),
+    ...(drafts || []).map((d) => d.child_id),
+  ]);
+  return (children || []).filter((child) => !taken.has(child.id));
 }
 
 /** The version currently in force for a child, or null. */
@@ -965,13 +1281,21 @@ export function describeScheduleChange(before, after) {
 // ── Private schedule drafts ─────────────────────────────────────────────────
 
 /**
- * The terms a draft would propose, in the exact shape `/api/propose-agreement`
- * takes.
+ * The terms a set of schedule fields would propose, in the exact shape
+ * `/api/propose-agreement` takes. `fields` is a saved draft row or the schedule
+ * form's current values — the same function either way.
  *
  * This exists so that "send my draft" and "propose a change from the form" go
  * through ONE definition of what a proposal's terms are. A draft that compiles
  * differently from the form it was typed into is a draft that proposes
  * something its author never saw.
+ *
+ * `effective_from`/`effective_to` are always null here, and deliberately not
+ * inherited from the version being amended. The form has no field for either,
+ * so an inherited value is one the proposer never saw: amending a schedule that
+ * had been ended carried its past end date forward, and both parents then
+ * countersigned a rotation that published no days at all. Ending a schedule is
+ * its own act (the retirement proposal), the only place an end date is set.
  *
  * `cycle` is stored already-compiled — the canonical day-by-day 'a'/'b' array,
  * not the pattern name — because that array is what gets countersigned, and a
@@ -982,7 +1306,7 @@ export function describeScheduleChange(before, after) {
  * agreement are missing), so a half-finished draft can be saved and reopened
  * without ever becoming a sendable proposal by accident.
  */
-export function draftProposalTerms(draft, fallbackTimezone) {
+export function scheduleProposalTerms(draft, fallbackTimezone) {
   if (!draft) return null;
   const cycle = normalizeCycle(draft.cycle);
   const timezone = draft.timezone || fallbackTimezone || null;
@@ -1005,6 +1329,9 @@ export function draftProposalTerms(draft, fallbackTimezone) {
     base_version_id: draft.base_version_id ?? null,
   };
 }
+
+/** The name the draft lane has always called it by. Same function. */
+export const draftProposalTerms = scheduleProposalTerms;
 
 /**
  * Why a draft cannot be sent yet, as a sentence, or null when it can.
@@ -1042,8 +1369,14 @@ export function draftSendBlocker(draft, agreed, fallbackTimezone) {
  * Validate a proposed swap before writing it. Returns { ok: true } or
  * { ok: false, error }. Pure — the caller supplies today's date so this stays
  * deterministic and testable.
+ *
+ * `opts.schedule` is the child's agreed version. When given, the swap must be
+ * between that version's two parents, inside its effective window (see
+ * swapPartyIssue — an app-side check, not the enforcement). `opts.horizonDays`
+ * bounds how far ahead it may start; see SWAP_HORIZON_DAYS.
  */
-export function validateSwap(swap, todayStr) {
+export function validateSwap(swap, todayStr, opts = {}) {
+  const horizonDays = opts.horizonDays ?? SWAP_HORIZON_DAYS;
   if (!swap.child_id) return { ok: false, error: "Pick a child." };
   if (!swap.start_date || !swap.end_date) return { ok: false, error: "Pick a date range." };
   if (toDayNumber(swap.end_date) < toDayNumber(swap.start_date)) {
@@ -1055,6 +1388,27 @@ export function validateSwap(swap, todayStr) {
   if (!swap.to_parent_id) return { ok: false, error: "Choose who should have the child." };
   if (swap.requester_id && swap.requester_id === swap.responder_id) {
     return { ok: false, error: "The other parent must be a different person." };
+  }
+  // The hub only projects this far, and refuses to lock a swap that moves no
+  // projected day — so one that starts beyond it could be requested and never
+  // agreed. Refused where the dates are picked, not on the other parent's
+  // countersignature.
+  if (todayStr && toDayNumber(swap.start_date) > toDayNumber(todayStr) + horizonDays) {
+    return {
+      ok: false,
+      error: `A swap can start at most ${horizonDays} days ahead (by ${addDays(todayStr, horizonDays)}) — `
+        + "the calendar is only worked out that far. Ask again closer to the date.",
+    };
+  }
+  if (opts.schedule !== undefined) {
+    const issue = swapPartyIssue(swap, opts.schedule);
+    if (issue) return { ok: false, error: issue };
+    if (todayStr && scheduleHasEnded(opts.schedule, todayStr)) {
+      return { ok: false, error: "This child's schedule has ended, so there is nothing for a swap to change." };
+    }
+    if (!withinEffectiveWindow(opts.schedule, swap.start_date) || !withinEffectiveWindow(opts.schedule, swap.end_date)) {
+      return { ok: false, error: "Those dates fall outside the agreed schedule." };
+    }
   }
   return { ok: true };
 }
