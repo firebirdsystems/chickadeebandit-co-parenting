@@ -59,6 +59,10 @@
     .cal-cell .who { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
     .cal-cell.today { outline: 2px solid var(--hub-primary, #4f46e5); outline-offset: -2px; }
     .cal-cell .ov-dot { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #1f2937; }
+    .cal-cell .hol-dot, .hol-dot { background: #d97706; }
+    .cal-cell .act-dot { position: absolute; bottom: 3px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #2563eb; }
+    .cal-cell .act-dot.disputed { background: #dc2626; }
+    .cal-cell.past { cursor: pointer; }
     .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 0.8rem; }
     .legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
 
@@ -139,7 +143,9 @@
     document.getElementById("page-glyph").innerHTML = glyph("compass");
     import {
       effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
-      nextTransition, upcomingTransitions, groupNotesByTransition,
+      nextTransition, upcomingTransitions, groupNotesByTransition, recentTransitions, exchangeOutcome, actualParentForDay, parentingTimeSummary,
+      HOLIDAY_PRESETS, holidayForDate, nextHolidayOccurrence, describeHolidayRule, parseHolidayRules,
+      holidayRulesBlocker, holidayProposalTerms, mergeHolidayVersion,
       notesForTransition, searchableFields, describeScheduleChange,
       soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
       pairingState, partitionMessagesBySession, counterpartOf,
@@ -150,7 +156,7 @@
       calendarCell, monthBounds, CUSTODY_LOOKBACK_DAYS, scheduleHasEnded,
       SWAP_HORIZON_DAYS, swapIsStalled, swapStallReason, swapPartyIssue,
       versionSignatures, unilateralStance, scheduleSnapshot, childrenOpenForNewSchedule, timeZoneChoices, timeZoneDefaultSource,
-      fmtHandoffDay as fmtHandoffDayFrom,
+      fmtHandoffDay as fmtHandoffDayFrom, fmtExchangeTime,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -211,6 +217,12 @@
     let spaceTimeZone = "UTC";
 let searchQ = "";       // in-app search (see logic.js searchableFields)
     let custodyDays = [];                        // materialized rotation (agenda/glance source)
+    /** The custody journal — each parent's account of exchanges and of where a
+     *  child actually was. Append-only; read with the handoff notes. */
+    let custodyLog = [];
+    /** Holiday schedules — the amendment and the hub's agreement row merged,
+     *  one record per proposal, like `versions`. Adults only. */
+    let holidayVersions = [];
     /** The earliest day `custodyDays` is known to be complete from. The first
      *  read is a window around today (see CUSTODY_WINDOW_SQL); older months are
      *  fetched when the grid is turned to them, and this moves back as they
@@ -227,6 +239,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
      *  schedule yet" — to a child, and to a parent about to set one up twice. */
     let custodyReadFailed = false;
     let versionsReadFailed = false;
+    /** Any other adults-only read. Counted for a parent only, like the versions:
+     *  a child is refused those tables by policy on every launch. */
+    let adultReadsFailed = false;
     // The FIRST load failed: nothing on any tab is known, so no tab is drawn.
     let loadFailed = false;
     let view = "schedule";
@@ -254,16 +269,19 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         memberMap = new Map(members.map(m => [m.id, m]));
         return;
       }
-      try {
-        const res = await fetch(`${CONTEXT}?keys=family.members,family.preferences`);
-        const ctx = await res.json();
-        members = ctx["family.members"] ?? [];
-        // The TENANT's zone, not this browser's. Custody-day boundaries are a
-        // term both parents agree to, so the default has to be the one they
-        // share — a proposer in another timezone must not silently define the
-        // handoff day from their own device clock.
-        spaceTimeZone = ctx["family.preferences"]?.timezone || spaceTimeZone;
-      } catch { members = []; }
+      // Not caught: a roster that could not be read is a failed load, not a
+      // household with nobody in it (no names, and canManage() silently false).
+      // A 200 can still name a key the hub failed to read, in `$errors`.
+      const res = await fetch(`${CONTEXT}?keys=family.members,family.preferences`);
+      const ctx = await res.json().catch(() => null);
+      if (!res.ok || !ctx || typeof ctx !== "object" || ctx.error) throw new Error("Couldn’t reach the hub. Try again.");
+      if (Array.isArray(ctx.$errors) && ["family.members", "family.preferences"].some((k) => ctx.$errors.includes(k))) throw new Error("Couldn’t reach the hub. Try again.");
+      members = ctx["family.members"] ?? [];
+      // The TENANT's zone, not this browser's. Custody-day boundaries are a
+      // term both parents agree to, so the default has to be the one they
+      // share — a proposer in another timezone must not silently define the
+      // handoff day from their own device clock.
+      spaceTimeZone = ctx["family.preferences"]?.timezone || spaceTimeZone;
       memberMap = new Map(members.map(m => [m.id, m]));
     }
 
@@ -274,12 +292,19 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       partnerProposalPending = !!status.proposal_pending;
     }
 
-    async function loadPartner() {
+    /** `first` is the boot's read: there, a pairing that could not be read is a
+     *  failed load, not "nobody is paired" (which would offer to pair again). */
+    async function loadPartner({ first = false } = {}) {
       if (DEMO) { partnerId = "demo-mom"; partnerReciprocal = true; partnerSessionId = "demo-session"; partnerProposalPending = false; return; }
       try {
         const res = await fetch(`/run/${APP_ID}/api/partner`);
-        applyPartnerStatus(res.ok ? await res.json() : {});
-      } catch { applyPartnerStatus({}); }
+        const json = res.ok ? await res.json().catch(() => null) : null;
+        if (first && (!json || typeof json !== "object" || json.error)) throw new Error("Couldn’t reach the hub. Try again.");
+        applyPartnerStatus(res.ok && json ? json : {});
+      } catch (e) {
+        if (first) throw e;
+        applyPartnerStatus({});
+      }
     }
 
     /** The one SELECT for the thread — the initial load and every refresh must
@@ -361,21 +386,25 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       // when this text is exactly the manifest's, so they are not built from P.
       const none = () => ({ rows: [] });
       const today = todayStr();
-      let versionsFailed = false;
+      let versionsFailed = false, adultFailed = false;
+      const failed = () => { adultFailed = true; return none(); };
       const [amd, ver, sr, sa, cd, adultOnly] = await Promise.all([
-        db("SELECT * FROM app_co_parenting__schedule_amendments ORDER BY created_at DESC").catch(none),
+        db("SELECT * FROM app_co_parenting__schedule_amendments ORDER BY created_at DESC").catch(failed),
         db("SELECT * FROM app_co_parenting__schedule_versions").catch(() => { versionsFailed = true; return none(); }),
-        db("SELECT * FROM app_co_parenting__swap_requests ORDER BY created_at DESC").catch(none),
-        db("SELECT * FROM app_co_parenting__swap_agreements").catch(none),
+        db("SELECT * FROM app_co_parenting__swap_requests ORDER BY created_at DESC").catch(failed),
+        db("SELECT * FROM app_co_parenting__swap_agreements").catch(failed),
         db(CUSTODY_WINDOW_SQL, [today]).catch(() => null),
         membersReady.then(() => canManage()
           ? Promise.all([
               loadMessages(),
-              db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`).catch(none),
+              db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`).catch(failed),
+              db(`SELECT * FROM ${P}custody_log ORDER BY day DESC, created_at DESC`).catch(failed),
+              db(`SELECT * FROM ${P}holiday_amendments ORDER BY created_at DESC`).catch(failed),
+              db(`SELECT * FROM ${P}holiday_versions`).catch(failed),
               // "My drafts" is the only query this table has. The WHERE clause is
               // the row policy's, not ours — owner_only appends it — so an app-side
               // filter here would be decoration, and its absence is not a leak.
-              db("SELECT * FROM app_co_parenting__schedule_drafts ORDER BY updated_at DESC").catch(none),
+              db("SELECT * FROM app_co_parenting__schedule_drafts ORDER BY updated_at DESC").catch(failed),
             ])
           : null),
       ]);
@@ -398,6 +427,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       // Only a parent's failure counts: a child's read of the versions is
       // refused by policy on every launch, which is the policy working.
       versionsReadFailed = versionsFailed && canManage();
+      adultReadsFailed = adultFailed && canManage();
 
       // swap_requests (party_scoped) and swap_agreements (endpoint_only) are both
       // governed tables — a JOIN across them is rejected — so load both and merge by id.
@@ -423,8 +453,14 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       else custodyReadFailed = true;
 
       if (adultOnly) {
-        const [msg, hn, dr] = adultOnly;
-        messages = msg?.rows ?? []; handoffs = hn.rows; drafts = dr.rows;
+        const [msg, hn, cl, ha, hv, dr] = adultOnly;
+        messages = msg?.rows ?? []; handoffs = hn.rows; custodyLog = cl.rows; drafts = dr.rows;
+        // Merged by id like the standing schedule: both are governed tables, so
+        // a JOIN is rejected, and an agreed version outlives its amendment row.
+        const hvById = new Map(hv.rows.map(v => [v.id, v]));
+        holidayVersions = ha.rows.map(a => mergeHolidayVersion(a, hvById.get(a.id)));
+        const haIds = new Set(ha.rows.map(a => a.id));
+        for (const v of hv.rows) if (!haIds.has(v.id)) holidayVersions.push(mergeHolidayVersion({ id: v.id }, v));
       }
     }
 
@@ -615,11 +651,13 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       ["swaps",    "swap",      "Swaps"],
       ["messages", "messages",  "Messages"],
       ["handoffs", "checklist", "Handoffs"],
+      ["holidays", "calendar",  "Holidays"],
       ["records",  "seal-document", "Records"],
       ["setup",    "gear",      "Setup"],
     ];
 
     function render() {
+      journalRedrawOwed = false;   // this draw shows whatever was adopted
       const tabsEl = document.getElementById("tabs");
       if (loadFailed) {
         tabsEl.innerHTML = "";
@@ -640,11 +678,14 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           // is no realtime channel here. It is also when the messages are
           // actually being read, so it is when the receipt is earned.
           if (view === "messages") refreshMessages();
+          // Same reasoning for the journal: an answer from the other parent is
+          // only ever noticed by looking, and this is the look.
+          if (JOURNAL_VIEWS.has(view)) refreshJournal();
         }));
 
       const el = document.getElementById("content");
       ({ schedule: renderSchedule, swaps: renderSwaps, messages: renderMessages,
-         handoffs: renderHandoffs, records: renderRecords, setup: renderSetup }[view] ?? renderSchedule)(el);
+         handoffs: renderHandoffs, holidays: renderHolidays, records: renderRecords, setup: renderSetup }[view] ?? renderSchedule)(el);
     }
 
     // ── Schedule view ────────────────────────────────────────────────────────
@@ -732,7 +773,10 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
             <span><span class="sw" style="background:${colA}"></span>${esc(memberName(sch.parent_a_id))}</span>
             <span><span class="sw" style="background:${colB}"></span>${esc(memberName(sch.parent_b_id))}</span>
             <span><span class="ov-dot" style="position:static;display:inline-block"></span> swap / override</span>
+            <span><span class="ov-dot hol-dot" style="position:static;display:inline-block"></span> holiday</span>
+            ${canManage() ? `<span><span class="act-dot" style="position:static;display:inline-block"></span> recorded otherwise</span>` : ""}
           </div>
+          ${canManage() ? parentingTimeHtml(sch) : ""}
           <p class="muted" style="margin:10px 0 0">${esc(patternLabel(sch))}${sch.exchange_time ? " · exchange at " + esc(sch.exchange_time) : ""}${
             sch.effective_to ? ` · ${ended ? "ended" : "ends"} ${esc(fmtHandoffDay(sch.effective_to))}` : ""}</p>
         </div>
@@ -753,6 +797,24 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           showCustodyMonth();
         }));
       el.querySelector("[data-newswap]")?.addEventListener("click", () => openSwapModal(sch.child_id));
+      el.querySelectorAll("[data-actual]").forEach(c =>
+        c.addEventListener("click", () => {
+          const [child_id, day] = c.dataset.actual.split("|");
+          openActualModal(child_id, day, recordByDay.get(day)?.parent_id ?? null);
+        }));
+    }
+
+    /** Planned against recorded days this month, per parent. Days nobody
+     *  recorded count as planned; a disputed day counts for nobody. */
+    function parentingTimeHtml(sch) {
+      const ym = `${calMonth.y}-${String(calMonth.m + 1).padStart(2, "0")}`;
+      const sum = parentingTimeSummary(custodyDays, custodyLog, sch.child_id, ym);
+      if (!sum.byParent.size) return "";
+      const parts = [...sum.byParent.entries()].map(([pid, c]) =>
+        `<span><b>${esc(memberName(pid))}</b> ${c.planned} planned${c.recorded !== c.planned || sum.recorded ? ` · ${c.recorded} recorded` : ""}</span>`);
+      const dispute = sum.disputed ? `<span class="muted">${sum.disputed} disputed day${sum.disputed === 1 ? "" : "s"}</span>` : "";
+      return `<div class="legend" data-testid="parenting-time" style="margin-top:8px">${parts.join("")}${dispute}</div>
+        <p class="hint" style="margin:4px 0 0">Click a past day to record where ${esc(memberName(sch.child_id))} actually was.</p>`;
     }
 
     /**
@@ -850,6 +912,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         const tint = bg === "transparent" ? "" : `background:${bg}22`;
         cells += `<div class="cal-cell ${date === todayStr() ? "today" : ""}" style="${tint}" title="${row ? esc(memberName(row.parent_id)) : ""}">
           ${row?.source === "exception" || row?.source === "override" ? `<span class="ov-dot"></span>` : ""}
+          ${row?.source === "holiday" ? `<span class="ov-dot hol-dot"></span>` : ""}
           <span class="dnum">${d}</span>
           <span class="who" style="color:${bg === "transparent" ? "inherit" : bg}">${row ? esc(initial(memberName(row.parent_id))) : ""}</span>
         </div>`;
@@ -861,11 +924,14 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       const first = new Date(calMonth.y, calMonth.m, 1);
       const daysInMonth = new Date(calMonth.y, calMonth.m + 1, 0).getDate();
       const today = todayStr();
+      // Found and parsed once for the month, not once per cell.
+      const agreedHoliday = agreedVersion(holidayVersions, sch.child_id);
+      const holiday = agreedHoliday ? { ...agreedHoliday, rules: parseHolidayRules(agreedHoliday.rules) } : null;
       let cells = "";
       for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty-cell"></div>`;
       for (let d = 1; d <= daysInMonth; d++) {
         const date = `${calMonth.y}-${String(calMonth.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-        const eff = calendarCell(sch, overrides, recordByDay, date, today);
+        const eff = calendarCell(sch, overrides, recordByDay, date, today, holiday);
         // A past day can belong to someone who is neither parent on the version
         // in force now (an earlier version named them, or a swap did), so the
         // record's own parent gets a colour rather than being drawn as nobody.
@@ -875,8 +941,15 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           : memberColor(eff.parent_id, members);
         const tint = bg === "transparent" ? "" : `background:${bg}22`;
         const who = eff.parent_id ? esc(initial(memberName(eff.parent_id))) : "";
-        cells += `<div class="cal-cell ${date === today ? "today" : ""}" style="${tint}" title="${eff.parent_id ? esc(memberName(eff.parent_id)) : ""}">
+        // A past day a parent may record: where the child actually was. The
+        // marker shows a recorded day that differs from the plan, or a dispute.
+        const past = date <= today && !!eff.parent_id && canManage();
+        const actual = past ? actualParentForDay(custodyLog, sch.child_id, date) : null;
+        const differs = actual && (actual.disputed || actual.parent_id !== eff.parent_id);
+        cells += `<div class="cal-cell ${date === today ? "today" : ""}${past ? " past" : ""}" style="${tint}" title="${eff.parent_id ? esc(memberName(eff.parent_id)) : ""}${eff.source === "holiday" && eff.label ? " · " + esc(eff.label) : ""}"${past ? ` data-actual="${esc(sch.child_id)}|${date}"` : ""}>
           ${eff.source === "override" ? `<span class="ov-dot"></span>` : ""}
+          ${eff.source === "holiday" ? `<span class="ov-dot hol-dot"></span>` : ""}
+          ${differs ? `<span class="act-dot${actual.disputed ? " disputed" : ""}" title="${actual.disputed ? "Disputed" : "Recorded: with " + esc(memberName(actual.parent_id))}"></span>` : ""}
           <span class="dnum">${d}</span>
           <span class="who" style="color:${bg === "transparent" ? "inherit" : bg}">${who}</span>
         </div>`;
@@ -1241,6 +1314,354 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       return isNaN(d) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     }
 
+    // ── Holidays view ────────────────────────────────────────────────────────
+    // A holiday schedule is an agreement, like the standing schedule: one
+    // parent proposes a list of rules, it takes effect when both have signed
+    // (or on one signature when there is nobody else to ask), and the hub
+    // works the rules out into custody days every year from then on — above
+    // the rotation, beneath any countersigned swap. Nothing here writes a day.
+    let holidayChildId = null;
+
+    function partyName(holiday, tag) {
+      return tag === "a" ? memberName(holiday.parent_a_id) : tag === "b" ? memberName(holiday.parent_b_id) : "";
+    }
+
+    /** "even years Dana · odd years Sam", "every year Dana", "even years Dana". */
+    function holidayWho(holiday, rule) {
+      if (rule.even_years && rule.even_years === rule.odd_years) return `every year ${partyName(holiday, rule.even_years)}`;
+      return [
+        rule.even_years ? `even years ${partyName(holiday, rule.even_years)}` : "",
+        rule.odd_years ? `odd years ${partyName(holiday, rule.odd_years)}` : "",
+      ].filter(Boolean).join(" · ");
+    }
+
+    function holidayRulesHtml(holiday) {
+      const rules = parseHolidayRules(holiday.rules);
+      const parties = { a: holiday.parent_a_id, b: holiday.parent_b_id };
+      if (!rules.length) return `<p class="muted">No rules could be read from this document.</p>`;
+      return rules.map(rule => {
+        const next = nextHolidayOccurrence(rule, parties, todayStr());
+        return `
+          <div data-testid="holiday-rule" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
+            <div class="spread">
+              <div><strong>${esc(rule.label)}</strong>
+                <div class="muted">${esc(describeHolidayRule(rule))}${rule.exchange_time ? ` · exchange ${esc(fmtExchangeTime(rule.exchange_time))}` : ""}</div>
+                <div class="muted">${esc(holidayWho(holiday, rule))}</div></div>
+              ${next ? `<div class="muted" style="text-align:right">Next<br><strong>${esc(fmtHandoffDay(next.start, todayStr()))}</strong><br>${esc(memberName(next.parent_id))}</div>` : ""}
+            </div>
+          </div>`;
+      }).join("");
+    }
+
+    function renderHolidays(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">Holiday schedules are agreed between the parents.</div>`; return; }
+      const kids = childIds();
+      if (!kids.length) {
+        el.innerHTML = `<div class="empty">Agree a custody schedule in Setup first — holidays are exceptions to it.</div>`;
+        return;
+      }
+      if (!holidayChildId || !kids.includes(holidayChildId)) holidayChildId = currentChildId && kids.includes(currentChildId) ? currentChildId : kids[0];
+      const cid = holidayChildId;
+      const agreed = agreedVersion(holidayVersions, cid);
+      // An agreed schedule with no rules is a retired one: nothing is in force,
+      // and it is still the version a new proposal must be written against.
+      const inForce = agreed && parseHolidayRules(agreed.rules).length ? agreed : null;
+      const pending = openAmendment(holidayVersions, cid);
+      const pendingEnds = pending && !parseHolidayRules(pending.rules).length;
+      const mine = pending?.proposed_by === me?.id;
+      // Which side has signed is inferred from who proposed, as the standing
+      // schedule does; the hub corrects it on the first countersign attempt.
+      const stance = pending ? amendmentStance(pending, me?.id, signedElsewhere.has(pending.id)) : null;
+
+      el.innerHTML = `
+        ${kids.length > 1 ? `<div class="pills">${kids.map(k =>
+          `<button class="pill ${k === cid ? "active" : ""}" data-hchild="${esc(k)}">${esc(memberName(k))}</button>`).join("")}</div>` : ""}
+        <div class="card">
+          <p class="muted" style="margin:0">A holiday schedule is agreed once and applies every year. It overrides the regular rotation on the days it names; a countersigned swap still overrides it.</p>
+        </div>
+        ${pending ? `
+          <div class="card" data-testid="holiday-pending">
+            <strong>${glyph("hourglass")} ${pendingEnds ? "Ending the holiday schedule proposed" : "Holiday schedule proposed"}${pending.proposed_by ? ` by ${esc(memberName(pending.proposed_by))}` : ""}</strong>
+            ${pending.rationale ? `<div class="muted">“${esc(pending.rationale)}”</div>` : ""}
+            ${pendingEnds
+              ? `<p class="muted">This names no days. Once countersigned, every day follows the regular rotation.</p>`
+              : holidayRulesHtml(pending)}
+            <p class="muted" style="margin:8px 0 0">${stance === "awaiting_them"
+              ? `Waiting for your co-parent to countersign. ${inForce ? "The holiday schedule in force stays as it is until they do." : "Nothing changes until they do."}`
+              : "This takes effect only once you countersign it."}</p>
+            <div class="row" style="margin-top:8px;gap:8px">
+              ${canSignAmendment(pending, me?.id, signedElsewhere.has(pending.id))
+                ? `<button class="btn btn-primary btn-sm" data-signhol="${esc(pending.id)}">Countersign</button>` : ""}
+              <button class="btn btn-sm btn-danger" data-declinehol="${esc(pending.id)}">${mine ? "Withdraw" : "Decline"}</button>
+            </div>
+          </div>` : ""}
+        ${inForce ? `
+          <div class="card" data-testid="holiday-agreed">
+            <div class="spread">
+              <strong>${esc(memberName(cid))}'s holiday schedule</strong>
+              <span class="badge b-locked">In force</span>
+            </div>
+            <div class="muted">${versionSignatures(agreed) === "both"
+              ? `Countersigned ${esc(fmtDateTime(agreed.agreed_at))}`
+              : `In force since ${esc(fmtDateTime(agreed.agreed_at))} on one parent's signature`}</div>
+            ${holidayRulesHtml(agreed)}
+          </div>` : (pending ? "" : `
+          <div class="empty" data-testid="holiday-empty"><div>${chickadee("nest", { size: 72 })}</div>${agreed ? "The holiday schedule was ended." : "No holiday schedule yet."}<br>
+            <span class="muted">Until there is one, every day follows the regular rotation.</span></div>`)}
+        ${pending ? "" : `<button class="btn btn-primary" data-newhol>${inForce ? "Propose changes" : "Propose a holiday schedule"}</button>`}
+        ${inForce && !pending ? `<p class="hint">To end the holiday schedule, propose changes with nothing ticked.</p>` : ""}`;
+
+      el.querySelectorAll("[data-hchild]").forEach(b =>
+        b.addEventListener("click", () => { holidayChildId = b.dataset.hchild; render(); }));
+      el.querySelector("[data-newhol]")?.addEventListener("click", () => openHolidayModal(cid, agreed));
+      el.querySelector("[data-signhol]")?.addEventListener("click", e => onSignHoliday(e.currentTarget.dataset.signhol, e.currentTarget));
+      el.querySelector("[data-declinehol]")?.addEventListener("click", e => onDeclineHoliday(e.currentTarget.dataset.declinehol, e.currentTarget));
+    }
+
+    /** The editor's working list: the agreed rules (ticked), then every preset
+     *  not already among them (ticked by its own default only on a first
+     *  schedule — a change starts from what is in force, nothing more). */
+    function holidayEditorRows(agreed) {
+      const current = agreed ? parseHolidayRules(agreed.rules) : [];
+      const have = new Set(current.map(r => r.id));
+      return [
+        ...current.map(r => ({ ...r, on: true })),
+        ...HOLIDAY_PRESETS.filter(p => !have.has(p.id)).map(p => ({
+          // Defaults are for a first schedule (or one after a retired one); a
+          // change to rules in force starts from those rules and nothing more.
+          ...p, on: current.length ? false : p.on,
+          even_years: "a", odd_years: p.same ? "a" : "b",
+        })),
+      ];
+    }
+
+    function openHolidayModal(childId, agreed) {
+      const sch = schedules.find(s => s.child_id === childId);
+      if (!sch) { hubAlert("Agree a custody schedule for this child first."); return; }
+      // The parents named on the holiday schedule are its own terms: those in
+      // force on it already, or the standing schedule's for a first one.
+      const parent_a_id = agreed?.parent_a_id ?? sch.parent_a_id;
+      const parent_b_id = agreed?.parent_b_id ?? sch.parent_b_id;
+      const rows = holidayEditorRows(agreed);
+      // A retired schedule (agreed, no rules) is still the version a proposal is
+      // written against, but there is nothing in force to change or to end.
+      const inForce = !!agreed && parseHolidayRules(agreed.rules).length > 0;
+      let customCount = 0;
+      const MONTH_OPTIONS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        .map((name, i) => `<option value="${i + 1}">${name}</option>`).join("");
+      const whoSelect = (i, field, value) => `
+        <select data-hwho="${i}|${field}" aria-label="${field === "even_years" ? "Even years" : "Odd years"}">
+          <option value="a" ${value === "a" ? "selected" : ""}>${esc(memberName(parent_a_id))}</option>
+          <option value="b" ${value === "b" ? "selected" : ""}>${esc(memberName(parent_b_id))}</option>
+          <option value="" ${!value ? "selected" : ""}>Regular schedule</option>
+        </select>`;
+      const rowsHtml = () => rows.map((r, i) => `
+        <div data-testid="holiday-edit-row" data-rule="${esc(r.id)}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
+          <label class="row" style="gap:8px"><input type="checkbox" data-hon="${i}" ${r.on ? "checked" : ""}>
+            <span><strong>${esc(r.label)}</strong> <span class="muted">${esc(describeHolidayRule(r))}</span></span></label>
+          <div class="row" style="gap:8px;margin:6px 0 0 24px;${r.on ? "" : "display:none"}" data-hdetail="${i}">
+            <label class="field" style="flex:1"><span>Even years</span>${whoSelect(i, "even_years", r.even_years)}</label>
+            <label class="field" style="flex:1"><span>Odd years</span>${whoSelect(i, "odd_years", r.odd_years)}</label>
+          </div>
+        </div>`).join("");
+
+      openModal(`
+        <h3>${inForce ? "Propose changes to the holiday schedule" : "Propose a holiday schedule"}</h3>
+        <p class="muted">For ${esc(memberName(childId))}. Tick the days it covers and choose who has each. It takes effect once ${esc(memberName(partnerId) || "the other parent")} countersigns, and then applies every year.</p>
+        <div id="h-rows">${rowsHtml()}</div>
+        <div class="card" style="margin-top:10px">
+          <strong>Add a date or a break</strong>
+          <label class="field"><span>Name</span><input type="text" id="hc-label" maxlength="80" placeholder="e.g. Spring break, ${esc(memberName(childId))}'s birthday"></label>
+          <div class="row" style="gap:8px">
+            <label class="field" style="flex:1"><span>From</span><span class="row" style="gap:4px"><select id="hc-sm">${MONTH_OPTIONS}</select><input type="number" id="hc-sd" min="1" max="31" value="1" style="width:4.5em"></span></label>
+            <label class="field" style="flex:1"><span>To (same day for one day)</span><span class="row" style="gap:4px"><select id="hc-em">${MONTH_OPTIONS}</select><input type="number" id="hc-ed" min="1" max="31" value="1" style="width:4.5em"></span></label>
+          </div>
+          <button class="btn btn-sm" id="hc-add" type="button">Add</button>
+        </div>
+        <label class="field"><span>Reason (optional)</span><textarea id="h-rationale" maxlength="500" placeholder="e.g. As set out in our parenting plan."></textarea></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-hol">Propose and sign</button>
+        </div>`);
+
+      const rowsEl = modalEl.querySelector("#h-rows");
+      // Delegated: the list is redrawn when a custom entry is added.
+      rowsEl.addEventListener("change", e => {
+        const on = e.target.dataset.hon, who = e.target.dataset.hwho;
+        if (on !== undefined) {
+          rows[Number(on)].on = e.target.checked;
+          rowsEl.querySelector(`[data-hdetail="${on}"]`).style.display = e.target.checked ? "" : "none";
+        } else if (who) {
+          const [i, field] = who.split("|");
+          rows[Number(i)][field] = e.target.value || null;
+        }
+      });
+      modalEl.querySelector("#hc-add").addEventListener("click", () => {
+        const label = modalEl.querySelector("#hc-label").value.trim();
+        const start = { month: Number(modalEl.querySelector("#hc-sm").value), day: Number(modalEl.querySelector("#hc-sd").value) };
+        const end = { month: Number(modalEl.querySelector("#hc-em").value), day: Number(modalEl.querySelector("#hc-ed").value) };
+        const single = start.month === end.month && start.day === end.day;
+        let id;
+        do { id = `custom-${++customCount}`; } while (rows.some(r => r.id === id));
+        const rule = single
+          ? { id, label, kind: "fixed", month: start.month, day: start.day, even_years: "a", odd_years: "b", on: true }
+          : { id, label, kind: "range", start, end, even_years: "a", odd_years: "b", on: true };
+        const blocker = holidayRulesBlocker([rule]);
+        if (blocker) { hubAlert(blocker); return; }
+        rows.push(rule);
+        rowsEl.innerHTML = rowsHtml();
+        modalEl.querySelector("#hc-label").value = "";
+      });
+      modalEl.querySelector("#save-hol").addEventListener("click", () =>
+        onProposeHoliday({
+          child_id: childId, parent_a_id, parent_b_id,
+          rules: rows.filter(r => r.on),
+          rationale: modalEl.querySelector("#h-rationale").value.trim(),
+          base_version_id: agreed?.id ?? null,
+          retiring: inForce,
+        }));
+    }
+
+    function agreeHoliday(id, agreed, resolution) {
+      return requestJson(`/run/${APP_ID}/api/agree`, {
+        body: { table: "holiday_versions", id, agreed, ...(resolution ? { resolution } : {}) },
+        fallbackError: "Could not record your decision",
+      });
+    }
+
+    // Same retry rule as the standing schedule's proposeAndSign: the hub mints
+    // the proposal's id, so a proposal that was written but could be neither
+    // signed nor withdrawn is remembered against its exact terms, and sending
+    // those terms again signs THAT row instead of proposing twice.
+    let unsignedHoliday = null;   // { key, id }
+
+    async function onProposeHoliday(input) {
+      const retiring = !!input.retiring;
+      const blocker = holidayRulesBlocker(input.rules, { retiring });
+      if (blocker) { hubAlert(blocker); return; }
+      if (!input.rules.length) {
+        const ok = await hubConfirm({
+          message: `End ${memberName(input.child_id)}'s holiday schedule?`,
+          description: "You have not ticked any days. Once this is countersigned, every day follows the regular rotation again. "
+            + "The schedule in force until then stays in the record.",
+          confirmLabel: "Propose ending it",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+      const terms = holidayProposalTerms(input);
+      if (!terms) { hubAlert("This holiday schedule is not complete."); return; }
+      const btn = modalEl.querySelector("#save-hol");
+      btn.disabled = true; btn.textContent = "Sending…";
+      try {
+        let result = { locked: true };
+        if (!DEMO) {
+          const key = JSON.stringify(terms);
+          let id = unsignedHoliday?.key === key ? unsignedHoliday.id : null;
+          if (!id) {
+            ({ id } = await requestJson(`/run/${APP_ID}/api/propose-agreement`, {
+              body: { table: "holiday_versions", values: terms },
+              fallbackError: "Could not record the proposal",
+            }));
+            unsignedHoliday = { key, id };
+          }
+          try {
+            result = await agreeHoliday(id, true);
+            unsignedHoliday = null;
+          } catch (e) {
+            const withdrawn = await agreeHoliday(id, false, true).then(() => true, () => false);
+            if (withdrawn) unsignedHoliday = null;
+            throw e;
+          }
+          await loadData();
+        } else {
+          holidayVersions = holidayVersions.filter(v => !(v.child_id === terms.child_id && v.status === "agreed"));
+          holidayVersions.unshift({ id: crypto.randomUUID(), ...terms, proposed_by: me?.id, status: "agreed",
+            household_a_agreed: 1, household_b_agreed: 0, agreed_at: new Date().toISOString() });
+        }
+        closeModal(); render();
+        announceProposal(result);
+        // An empty document ends the schedule; telling the other parent that a
+        // schedule was "proposed" would have them open it expecting holidays.
+        const ending = !input.rules.length;
+        const kid = memberName(terms.child_id);
+        if (ending) {
+          notifySchedule(result.locked ? "Holiday schedule ended" : "Ending the holiday schedule proposed",
+            result.locked
+              ? `${me?.name} ended the holiday schedule for ${kid}.`
+              : `${me?.name} proposed ending the holiday schedule for ${kid}. It ends once you countersign.`,
+            { view: "holidays" });
+        } else {
+          notifySchedule(result.locked ? "Holiday schedule in force" : "Holiday schedule proposed",
+            result.locked
+              ? `${me?.name} set a holiday schedule for ${kid}.`
+              : `${me?.name} proposed a holiday schedule for ${kid}. It takes effect once you countersign it.`,
+            { view: "holidays" });
+        }
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Propose and sign";
+        hubAlert(e.message);
+      }
+    }
+
+    async function onSignHoliday(id, btn) {
+      const holiday = holidayVersions.find(v => v.id === id);
+      if (!holiday) return;
+      if (btn) { btn.disabled = true; btn.textContent = "Signing…"; }
+      try {
+        const result = await agreeHoliday(id, true);
+        // `already_agreed` with `locked` is a retry that finished the job: the
+        // hub records a signature before it applies the lock, so a countersign
+        // it turned away ("try again") left the signature on the row, and this
+        // one locked it. Only an unlocked row is still waiting on anyone.
+        if (result.already_agreed && !result.locked) {
+          signedElsewhere.add(id);
+          await loadData(); render();
+          hubAlert("You've already countersigned this. It takes effect once your co-parent does too.");
+          return;
+        }
+        // The custody days are rewritten in the same transaction as the lock.
+        await loadData(); render();
+        if (result.locked) {
+          const ending = !parseHolidayRules(holiday.rules).length;
+          notifySchedule(ending ? "Holiday schedule ended" : "Holiday schedule agreed",
+            ending
+              ? `${me?.name} countersigned ending ${memberName(holiday.child_id)}'s holiday schedule. Every day follows the regular rotation again.`
+              : `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It's now in force.`,
+            { view: "holidays" });
+        }
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = "Countersign"; }
+        hubAlert(e.message);
+      }
+    }
+
+    async function onDeclineHoliday(id, btn) {
+      const holiday = holidayVersions.find(v => v.id === id);
+      if (!holiday) return;
+      const mine = holiday.proposed_by === me?.id;
+      const ok = await hubConfirm({
+        message: mine ? "Withdraw your proposed holiday schedule?" : "Decline this proposed holiday schedule?",
+        description: "Any holiday schedule currently in force is unaffected.",
+        destructive: true,
+      });
+      if (!ok) return;
+      if (btn) { btn.disabled = true; btn.textContent = mine ? "Withdrawing…" : "Declining…"; }
+      try {
+        // `resolution: true`: the hub resolves it the way OUR side resolves and
+        // says which word it used (see onDeclineAmendment).
+        const result = await agreeHoliday(id, false, true);
+        const withdrew = result.status === "withdrawn";
+        await loadData(); render();
+        notifySchedule(withdrew ? "Holiday schedule withdrawn" : "Holiday schedule declined",
+          `${me?.name} ${withdrew ? "withdrew their proposed" : "declined the proposed"} holiday schedule for ${memberName(holiday.child_id)}.`,
+          { view: "holidays" });
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = mine ? "Withdraw" : "Decline"; }
+        hubAlert(e.message);
+      }
+    }
+
     // ── Records view ─────────────────────────────────────────────────────────
     // The hub renders the documents (GET api/reports). Each runs as the
     // signed-in parent through the same row policies as this app's own reads,
@@ -1395,6 +1816,18 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           ${g.isUpcoming ? `<div style="margin-top:10px"><button class="btn btn-sm" data-addfor="${esc(g.transition.child_id)}|${esc(g.transition.day)}">+ Add another note</button></div>` : ""}
         </div>`).join("");
 
+      // What happened at the exchanges of the last two weeks. Each is one
+      // parent's account; the other parent answers it rather than editing it.
+      const recent = recentTransitions(custodyDays, todayStr());
+      const recentHtml = recent.length ? `
+        <div class="card" data-testid="recent-exchanges">
+          <div class="spread" style="margin-bottom:8px">
+            <strong>Recent exchanges</strong>
+            <span class="muted">What actually happened</span>
+          </div>
+          ${recent.map(t => exchangeRow(t)).join("")}
+        </div>` : "";
+
       const otherHtml = unanchored.length ? `
         <div class="card">
           <div class="spread" style="margin-bottom:8px">
@@ -1404,9 +1837,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           ${unanchored.map(h => noteRow(h, { dated: true })).join("")}
         </div>` : "";
 
-      const body = (groups.length || unanchored.length)
+      const body = recentHtml + ((groups.length || unanchored.length)
         ? groupHtml + otherHtml
-        : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`;
+        : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`);
 
       el.innerHTML = `
         <div class="spread" style="margin-bottom:12px">
@@ -1420,6 +1853,206 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         const [child_id, day] = b.dataset.addfor.split("|");
         openHandoffModal({ child_id, day });
       }));
+      el.querySelectorAll("[data-outcome]").forEach(b => b.addEventListener("click", () => {
+        const [child_id, day, kind] = b.dataset.outcome.split("|");
+        const t = recent.find(r => r.child_id === child_id && r.day === day);
+        if (kind === "exchange_as_planned") saveLogEntry({ child_id, day, kind }, b, "Happened as planned");
+        else openOutcomeModal(t, kind);
+      }));
+      el.querySelectorAll("[data-answer]").forEach(b => b.addEventListener("click", () => {
+        const [entryId, kind] = b.dataset.answer.split("|");
+        const entry = custodyLog.find(e => e.id === entryId);
+        if (!entry) return;
+        if (kind === "acknowledge") saveLogEntry({ child_id: entry.child_id, day: entry.day, kind, responds_to_id: entry.id }, b, "Acknowledge");
+        else openResponseModal(entry);
+      }));
+    }
+
+    const OUTCOME_LABEL = {
+      exchange_as_planned: "Happened as planned",
+      exchange_late: "Late",
+      exchange_missed: "Didn't happen",
+      disputed: "Disputed",
+    };
+
+    function exchangeRow(t) {
+      const o = exchangeOutcome(custodyLog, t.child_id, t.day);
+      const when = `${esc(fmtHandoffDay(t.day, todayStr()))}${t.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(t))}` : ""}`;
+      // The journal is append-only, so a mistake is corrected by appending: a
+      // parent's LATEST account is the one that stands, and their latest answer
+      // to the other parent's standing account is the one that counts. The
+      // controls therefore never go away — they change from "record" to
+      // "correct" — and an entry that has been replaced says so.
+      const standingIds = new Set(o.standing.map(e => e.id));
+      const myStanding = o.standing.find(e => e.created_by === me?.id) ?? null;
+      const head = `
+        <div class="spread">
+          <div><strong>${esc(t.title)}</strong><div class="muted">${when}</div></div>
+          ${o.state === "unrecorded" ? "" : `<span class="badge ${o.state === "disputed" ? "b-pending" : o.state === "exchange_as_planned" ? "b-locked" : "b-cancelled"}">${esc(OUTCOME_LABEL[o.state] ?? o.state)}</span>`}
+        </div>`;
+      const entries = o.entries.map(e => {
+        const answered = o.responses.filter(r => r.responds_to_id === e.id);
+        const mine = e.created_by === me?.id;
+        const stands = standingIds.has(e.id);
+        // My answer that currently counts against this entry, if any.
+        const myAnswer = o.current.find(r => r.created_by === me?.id && r.responds_to_id === e.id) ?? null;
+        const answerButtons = mine || !stands ? "" : `
+              <div style="margin:4px 0 0 12px">
+                ${myAnswer?.kind === "acknowledge" ? "" : `<button class="btn btn-sm" data-answer="${esc(e.id)}|acknowledge">${myAnswer ? "Acknowledge instead" : "Acknowledge"}</button>`}
+                ${myAnswer?.kind === "dispute" ? "" : `<button class="btn btn-sm" data-answer="${esc(e.id)}|dispute">${myAnswer ? "Dispute instead…" : "Dispute…"}</button>`}
+              </div>`;
+        return `
+          <div class="muted" style="margin-top:6px${stands ? "" : ";opacity:.7"}" data-entry="${esc(e.id)}">
+            ${esc(memberName(e.created_by))}: <b>${esc(OUTCOME_LABEL[e.kind] ?? e.kind)}</b>${e.actual_time ? ` at ${esc(fmtExchangeTime(e.actual_time))}` : ""}${e.note ? ` — ${esc(e.note)}` : ""}${stands ? "" : ` <span class="note-cat">replaced</span>`}
+            ${answered.map(r => `<div style="margin-left:12px">${esc(memberName(r.created_by))} ${r.kind === "dispute" ? "disputes this" : "acknowledges this"}${r.note ? `: ${esc(r.note)}` : ""}</div>`).join("")}
+            ${answerButtons}
+          </div>`;
+      }).join("");
+      // Correcting offers the outcomes other than the one already standing.
+      const outcomeBtn = (kind, label, primary) => myStanding?.kind === kind && kind === "exchange_as_planned" ? ""
+        : `<button class="btn btn-sm${primary && !myStanding ? " btn-primary" : ""}" data-outcome="${esc(t.child_id)}|${esc(t.day)}|${kind}">${label}</button>`;
+      const buttons = `
+        <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap" data-testid="${myStanding ? "exchange-correct" : "exchange-record"}">
+          ${myStanding ? `<span class="muted">Correct your account:</span>` : ""}
+          ${outcomeBtn("exchange_as_planned", "Happened as planned", true)}
+          ${outcomeBtn("exchange_late", "Late…", false)}
+          ${outcomeBtn("exchange_missed", "Didn't happen…", false)}
+        </div>`;
+      return `<div data-testid="exchange-row" data-exchange="${esc(t.child_id)}|${esc(t.day)}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">${head}${entries}${buttons}</div>`;
+    }
+
+    // The views that draw from the journal: the exchange list and its notes,
+    // and the calendar's "recorded otherwise" markers and monthly totals.
+    const JOURNAL_VIEWS = new Set(["handoffs", "schedule"]);
+    let journalVersion = 0;        // bumped on a local append, so a stale read cannot unsend it
+    let journalRefresh = null;
+    /** New journal rows were adopted while a modal covered the view. Paid by
+     *  closeModal, and cleared by any render, which draws them anyway. */
+    let journalRedrawOwed = false;
+
+    /**
+     * Re-read the journal and the handoff notes. The other parent's entries,
+     * answers and notes arrive no other way — there is no realtime channel —
+     * so this runs when a journal view is opened and when the app is returned
+     * to on one. One at a time; a read that a local append overtook is dropped.
+     */
+    function refreshJournal() {
+      if (DEMO || !canManage() || loadFailed) return Promise.resolve();
+      if (journalRefresh) return journalRefresh;
+      const versionBefore = journalVersion;
+      journalRefresh = Promise.all([
+        db(`SELECT * FROM ${P}custody_log ORDER BY day DESC, created_at DESC`),
+        db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`),
+      ]).then(([log, notes]) => {
+        if (versionBefore !== journalVersion) return;
+        const sameIds = (a, b) => a.length === b.length && a.every((row, i) => row.id === b[i]?.id);
+        const changed = !sameIds(log.rows, custodyLog) || !sameIds(notes.rows, handoffs);
+        custodyLog = log.rows; handoffs = notes.rows;
+        if (!changed || !JOURNAL_VIEWS.has(view)) return;
+        // Not while a modal is open: redrawing the view under it is harmless,
+        // but the modal's own text was drawn from the old rows. The redraw is
+        // OWED instead, and paid when the modal closes — the rows are already
+        // adopted, so no later refresh would see a difference and draw them.
+        if (modalEl) journalRedrawOwed = true;
+        else render();
+      })
+        // Non-fatal: the rows already shown stay, and the next look tries again.
+        .catch(() => {})
+        .finally(() => { journalRefresh = null; });
+      return journalRefresh;
+    }
+
+    /** Append one journal entry. `btn` is disabled while it saves; the entry is
+     *  shown at once and the other parent is told. */
+    async function saveLogEntry(data, btn, label) {
+      if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+      const now = new Date().toISOString();
+      try {
+        let id = crypto.randomUUID();
+        if (!DEMO) {
+          // An answer goes through its own record, which the hub refuses unless
+          // the entry it names exists and is one this parent can read.
+          // And "where the child was" has its own, which requires a parent.
+          const record = data.kind === "acknowledge" || data.kind === "dispute" ? "custody_answers"
+            : data.kind === "child_with" ? "custody_facts" : "custody_log";
+          const r = await appendRecord(record, data);
+          id = r.id ?? id;
+        }
+        custodyLog.unshift({ id, parent_id: null, actual_time: null, responds_to_id: null, note: null, ...data, created_by: me?.id, created_at: now });
+        journalVersion++;
+        closeModal(); render();
+        const what = data.kind === "child_with" ? `recorded where ${memberName(data.child_id)} was on ${fmtHandoffDay(data.day)}`
+          : data.kind === "acknowledge" || data.kind === "dispute" ? `${data.kind === "dispute" ? "disputed" : "acknowledged"} your entry for ${fmtHandoffDay(data.day)}`
+          : `recorded ${memberName(data.child_id)}'s exchange on ${fmtHandoffDay(data.day)}: ${(OUTCOME_LABEL[data.kind] ?? data.kind).toLowerCase()}`;
+        notifyPartner("Custody journal", `${me?.name} ${what}.`, { view: "handoffs" });
+        return true;
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
+        hubAlert(e.message);
+        return false;
+      }
+    }
+
+    function openOutcomeModal(t, kind) {
+      const late = kind === "exchange_late";
+      openModal(`
+        <h3>${late ? "Late exchange" : "Exchange didn't happen"}</h3>
+        <p class="muted">${esc(t.title)} · ${esc(fmtHandoffDay(t.day, todayStr()))}${t.exchange_time ? ` · planned ${esc(fmtExchangeTimeLabel(t))}` : ""}</p>
+        ${late ? `<label class="field"><span>Actual time</span><input type="time" id="o-time" data-autofocus value="${esc(t.exchange_time ?? "")}"></label>` : ""}
+        <label class="field"><span>Note (optional)</span><textarea id="o-note" ${late ? "" : "data-autofocus"} maxlength="2000" placeholder="${late ? "e.g. Traffic on the bridge." : "e.g. No one at the pickup point; waited 30 minutes."}"></textarea></label>
+        <p class="hint">This is your account. ${esc(memberName(partnerId) || "The other parent")} can acknowledge or dispute it, and both accounts stay on the record.</p>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-outcome">Record</button>
+        </div>`);
+      modalEl.querySelector("#save-outcome").addEventListener("click", async () => {
+        const actual_time = late ? modalEl.querySelector("#o-time").value : "";
+        if (late && !/^\d{2}:\d{2}$/.test(actual_time)) { modalEl.querySelector("#o-time").focus(); return; }
+        const note = modalEl.querySelector("#o-note").value.trim();
+        await saveLogEntry({ child_id: t.child_id, day: t.day, kind, ...(late ? { actual_time } : {}), ...(note ? { note } : {}) },
+          modalEl.querySelector("#save-outcome"), "Record");
+      });
+    }
+
+    function openResponseModal(entry) {
+      openModal(`
+        <h3>Dispute this entry</h3>
+        <p class="muted">${esc(memberName(entry.created_by))} recorded: <b>${esc(OUTCOME_LABEL[entry.kind] ?? entry.kind)}</b>${entry.actual_time ? ` at ${esc(fmtExchangeTime(entry.actual_time))}` : ""} for ${esc(memberName(entry.child_id))} on ${esc(fmtHandoffDay(entry.day, todayStr()))}.</p>
+        <label class="field"><span>Your account</span><textarea id="r-note" data-autofocus maxlength="2000" placeholder="What happened, as you saw it."></textarea></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-response">Record dispute</button>
+        </div>`);
+      modalEl.querySelector("#save-response").addEventListener("click", async () => {
+        const note = modalEl.querySelector("#r-note").value.trim();
+        if (!note) { modalEl.querySelector("#r-note").focus(); return; }
+        await saveLogEntry({ child_id: entry.child_id, day: entry.day, kind: "dispute", responds_to_id: entry.id, note },
+          modalEl.querySelector("#save-response"), "Record dispute");
+      });
+    }
+
+    function openActualModal(child_id, day, plannedParentId) {
+      const existing = actualParentForDay(custodyLog, child_id, day);
+      const choices = adults().filter(m => m.id === plannedParentId || schedules.some(s => s.child_id === child_id && (s.parent_a_id === m.id || s.parent_b_id === m.id)));
+      openModal(`
+        <h3>Where was ${esc(memberName(child_id))}?</h3>
+        <p class="muted">${esc(fmtHandoffDay(day, todayStr()))}${plannedParentId ? ` · agreed schedule: with ${esc(memberName(plannedParentId))}` : ""}</p>
+        ${existing ? `<p class="muted">${existing.entries.map(e => `${esc(memberName(e.created_by))} recorded: with ${esc(memberName(e.parent_id))}`).join("<br>")}</p>` : ""}
+        <div class="field"><span>Actually with</span>
+          ${choices.map(m => `<label class="row" style="gap:8px"><input type="radio" name="actual" value="${esc(m.id)}" ${m.id === plannedParentId ? "checked" : ""}> ${esc(m.name)}</label>`).join("")}
+        </div>
+        <label class="field"><span>Note (optional)</span><textarea id="a-note" maxlength="2000"></textarea></label>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-actual">Record</button>
+        </div>`);
+      modalEl.querySelector("#save-actual").addEventListener("click", async () => {
+        const parent_id = modalEl.querySelector('input[name="actual"]:checked')?.value;
+        if (!parent_id) return;
+        const note = modalEl.querySelector("#a-note").value.trim();
+        await saveLogEntry({ child_id, day, kind: "child_with", parent_id, ...(note ? { note } : {}) },
+          modalEl.querySelector("#save-actual"), "Record");
+      });
     }
 
     // `dated` for a note with no handoff heading above it to say when: under
@@ -1630,7 +2263,15 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       modalEl.querySelector("[data-close]")?.addEventListener("click", closeModal);
       focusAutofocus(modalEl);
     }
-    function closeModal() { modalEl?.remove(); modalEl = null; }
+    function closeModal() {
+      modalEl?.remove(); modalEl = null;
+      // Cancelled or saved, the view underneath may be showing rows older than
+      // the ones a refresh adopted while this was open (see refreshJournal).
+      if (journalRedrawOwed) {
+        journalRedrawOwed = false;
+        if (JOURNAL_VIEWS.has(view)) render();
+      }
+    }
     function focusAutofocus(root) {
       const t = root.querySelector("[data-autofocus]");
       if (t) setTimeout(() => t.focus(), 30);
@@ -2597,6 +3238,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           id = r.id ?? id;
         }
         handoffs.unshift({ id, child_id, note_date, category, body, created_by: me?.id, created_at: now });
+        journalVersion++;
         closeModal(); render();
         notifyPartner("Handoff note", `${me?.name} added a ${category} note for ${memberName(child_id)}.`, { view: "handoffs" });
       } catch (e) {
@@ -2614,21 +3256,27 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     // Coming back to the tab is the other moment a stale thread gets noticed.
     // Scoped to the messages view so returning to the calendar costs nothing.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && view === "messages") refreshMessages();
+      if (document.visibilityState !== "visible") return;
+      if (view === "messages") refreshMessages();
+      if (JOURNAL_VIEWS.has(view)) refreshJournal();
     });
 
     async function firstLoad() {
       // Members, the partner link and the data are independent requests; only
       // loadData's adult-only reads wait on members (see loadData).
-      const membersReady = loadMembers();
-      await Promise.all([membersReady, loadPartner(), loadData(membersReady)]);
+      // A roster or pairing that could not be read fails the load: caught here
+      // so the other reads still settle before the banner is drawn.
+      let contextFailed = false;
+      const membersReady = loadMembers().catch(() => { contextFailed = true; });
+      await Promise.all([membersReady, loadPartner({ first: true }).catch(() => { contextFailed = true; }), loadData(membersReady)]);
       // loadData swallows each read's failure, since some are refused by policy
-      // for a child; these two are the ones it already knows to be real.
-      loadFailed = custodyReadFailed || versionsReadFailed;
+      // for a child; these are the ones it already knows to be real.
+      loadFailed = contextFailed || custodyReadFailed || versionsReadFailed || adultReadsFailed;
       handleDeepLink();
       render();
       // A deep link can land straight on the thread (notifications point here).
       if (view === "messages" && !loadFailed) refreshMessages();
+      // No journal refresh here: loadData has just read it.
     }
     firstLoad();
   </script>

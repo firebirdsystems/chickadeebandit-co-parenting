@@ -143,7 +143,7 @@ describe("manifest ↔ app agreement", async () => {
   // day from any view filtered on a timestamp.
   it("includes the whole end day in every report filtered on a timestamp", () => {
     const stamped = manifest.reports.views.filter((v) => /_at >= :range_start/.test(v.source.query)).map((v) => v.id);
-    expect(stamped.sort()).toEqual(["message_log", "standing_schedule", "swap_requests"]);
+    expect(stamped.sort()).toEqual(["holiday_schedule", "message_log", "standing_schedule", "swap_requests"]);
     for (const id of stamped) {
       const query = manifest.reports.views.find((v) => v.id === id).source.query;
       expect(query, id).toMatch(/substr\([\w.]+_at, 1, 10\) <= substr\(:range_end, 1, 10\)/);
@@ -159,6 +159,101 @@ describe("manifest ↔ app agreement", async () => {
     expect(view.source.query).toContain("read_at AS first_viewed");
     expect(view.columns.find((c) => c.key === "first_viewed")).toEqual({ key: "first_viewed", label: "First viewed", format: "datetime" });
     expect(view.description).toMatch(/set by the hub/);
+  });
+
+  // A holiday schedule moves custody days, so it is held to what the standing
+  // schedule is: an agreement both households sign, written only by the hub,
+  // one version in force per child, projected only once locked.
+  it("makes the holiday schedule a countersigned agreement the hub projects beneath swaps", () => {
+    const agreement = manifest.agreements.holiday_versions;
+    const standing = manifest.agreements.schedule_versions;
+    expect(agreement.party_mode).toBe("steward_households");
+    expect(agreement.participant_columns).toEqual(standing.participant_columns);
+    expect(agreement.locked_value).toBe("agreed");
+    expect(agreement.init_from_table).toBe("holiday_amendments");
+    expect(agreement.version_series.scope_columns).toEqual(["child_id"]);
+    expect(agreement.snapshot_columns).toEqual(expect.arrayContaining(["child_id", "parent_a_id", "parent_b_id", "rules"]));
+    for (const table of ["holiday_amendments", "holiday_versions"]) {
+      expect(manifest.row_policies[table]).toMatchObject({ kind: "endpoint_only", read: "adult", audit_writes: true });
+    }
+    const recurring = manifest.cycle_projection.recurring_exceptions;
+    expect(recurring).toMatchObject({
+      table: "holiday_versions", status_column: agreement.status_column, active_value: agreement.locked_value,
+      scope_column: "child_id", rules_column: "rules",
+    });
+    expect(recurring.party_columns).toEqual(manifest.cycle_projection.party_columns);
+    expect(recurring.table).not.toBe(manifest.cycle_projection.exceptions.table);
+    expect(manifest.db_plaintext_columns).toContain("rules");
+  });
+
+  // The Handoffs tab reads the clock out of a transition's subtitle by
+  // stripping "Handoff " — so a holiday handoff must keep the ordinary
+  // transition subtitle, and the holiday's name goes in the title instead.
+  it("keeps the handoff subtitle parseable on a holiday", () => {
+    const t = manifest.cycle_projection.templates;
+    expect(t.holiday_transition_subtitle).toBeUndefined();
+    expect(t.transition_subtitle).toBe("Handoff {time}");
+    expect(t.holiday_title).toContain("{label}");
+    expect(t.holiday_transition_title).toContain("{label}");
+  });
+
+  // The custody journal is testimony: append-only through the endpoint, adult
+  // read, kept as long as the custody record it is read against, and never
+  // countersigned — an agreement would let one parent keep the other's account
+  // off the record.
+  it("keeps the custody journal append-only, adult-read, and retained like the custody record", () => {
+    const policy = manifest.row_policies.custody_log;
+    expect(policy).toMatchObject({ kind: "endpoint_only", read: "adult", audit_writes: true });
+    expect(policy.retain_days).toEqual({ default: 400, timestamp_column: "day", tier: "evidentiary" });
+    expect(manifest.row_policies.custody_days.retain_days.default).toBe(policy.retain_days.default);
+    const rec = manifest.append_only_records.custody_log;
+    expect(rec.write_acl).toEqual({ require_role: "adult" });
+    expect(rec.required_columns).toEqual(["child_id", "day", "kind"]);
+    expect(rec.allowed_values.kind).toEqual(["exchange_as_planned", "exchange_late", "exchange_missed"]);
+    expect(rec.value_formats).toEqual({ day: "date", actual_time: "time" });
+    // "Where the child was" names a parent or is not recorded at all.
+    const facts = manifest.append_only_records.custody_facts;
+    expect(facts).toMatchObject({ table: "custody_log", write_acl: { require_role: "adult" }, value_formats: { day: "date" } });
+    expect(facts.allowed_values.kind).toEqual(["child_with"]);
+    expect(facts.required_columns).toContain("parent_id");
+    expect(rec.allowed_columns).not.toContain("parent_id");
+    // An account cannot be written as an answer, and an answer cannot be
+    // written without naming a real entry: answers have a record of their own
+    // whose parent check the hub runs before and inside the insert.
+    expect(rec.allowed_columns).not.toContain("responds_to_id");
+    const answers = manifest.append_only_records.custody_answers;
+    expect(answers).toMatchObject({
+      table: "custody_log", parent_table: "custody_log", parent_fk_column: "responds_to_id",
+      write_acl: { require_role: "adult" },
+    });
+    expect(answers.allowed_values.kind).toEqual(["acknowledge", "dispute"]);
+    // Only an exchange account is answerable — never an answer, never a fact.
+    expect(answers.parent_status_column).toBe("kind");
+    expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with"]);
+    expect(answers.value_formats).toEqual({ day: "date" });
+    expect(answers.required_columns).toContain("responds_to_id");
+    expect(answers.allowed_columns).not.toContain("parent_id");
+    expect(manifest.agreements.custody_log).toBeUndefined();
+    for (const col of ["day", "kind", "actual_time"]) expect(manifest.db_plaintext_columns).toContain(col);
+  });
+
+  it("says in the exchange log WHICH entry an answer answers, not only whose", () => {
+    const view = manifest.reports.views.find((v) => v.id === "exchange_log");
+    expect(view.columns.map((c) => c.key)).toEqual(expect.arrayContaining(["answers", "answers_kind", "answers_recorded_at"]));
+    expect(view.columns.length).toBeLessThanOrEqual(12);
+    // Filed under the exchange it answers, whatever day the answer itself carries.
+    expect(view.source.query).toContain("COALESCE(r.day, l.day) AS day");
+  });
+
+  it("reports the journal through two adult views that children cannot read", () => {
+    const ids = manifest.reports.views.map((v) => v.id);
+    expect(ids).toContain("exchange_log");
+    expect(ids).toContain("custody_actuals");
+    for (const id of ["exchange_log", "custody_actuals"]) {
+      const view = manifest.reports.views.find((v) => v.id === id);
+      expect(view.source.query).toContain("app_co_parenting__custody_log");
+      expect(view.source.query).toMatch(/l\.day >= :range_start AND l\.day <= :range_end/);
+    }
   });
 
   // `swap_requests.status` is never told about a lock and stays editable; the

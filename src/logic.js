@@ -626,7 +626,7 @@ export function swapPartyIssue(swap, schedule) {
  * A date outside the version's effective window resolves to nobody.
  * Returns { parent_id, source: 'schedule' | 'override', override_id? }.
  */
-export function effectiveForDate(schedule, overrides, dateStr) {
+export function effectiveForDate(schedule, overrides, dateStr, holiday = null) {
   if (!withinEffectiveWindow(schedule, dateStr)) return { parent_id: null, source: "schedule" };
   const day = toDayNumber(dateStr);
   let winner = null;
@@ -636,6 +636,9 @@ export function effectiveForDate(schedule, overrides, dateStr) {
     if (!winner || String(ov.created_at) > String(winner.created_at)) winner = ov;
   }
   if (winner) return { parent_id: winner.parent_id, source: "override", override_id: winner.id };
+  // The agreed holiday schedule sits above the rotation and beneath a swap.
+  const held = holiday && holiday.child_id === schedule.child_id ? holidayForDate(holiday, dateStr) : null;
+  if (held) return { parent_id: held.parent_id, source: "holiday", label: held.rule.label };
   return { parent_id: baseParentForDate(schedule, dateStr), source: "schedule" };
 }
 
@@ -657,13 +660,17 @@ export function effectiveForDate(schedule, overrides, dateStr) {
  * `recordByDay` is a Map of day → custody_days row for this child.
  * → { parent_id, source: 'schedule' | 'override' | 'record' }
  */
-export function calendarCell(schedule, overrides, recordByDay, dateStr, todayStr) {
+export function calendarCell(schedule, overrides, recordByDay, dateStr, todayStr, holiday = null) {
   if (todayStr && String(dateStr) < String(todayStr)) {
     const row = recordByDay?.get(dateStr);
     if (!row) return { parent_id: null, source: "record" };
+    // The holiday's name rides in the subtitle only on a day that is not a
+    // handoff: a handoff keeps "Handoff {time}" there (the Handoffs tab reads
+    // the clock out of it), which is not a name to show.
+    if (row.source === "holiday") return { parent_id: row.parent_id ?? null, source: "holiday", label: row.is_transition ? "" : row.subtitle ?? "" };
     return { parent_id: row.parent_id ?? null, source: row.source === "override" || row.source === "exception" ? "override" : "record" };
   }
-  return effectiveForDate(schedule, overrides, dateStr);
+  return effectiveForDate(schedule, overrides, dateStr, holiday);
 }
 
 /** First and last day of a calendar month ('YYYY-MM-DD'); `month` is 0-based. */
@@ -1494,4 +1501,395 @@ export function partitionMessagesBySession(messages, meId, sessionId) {
     .sort((a, b) => b.latest.localeCompare(a.latest))
     .map(({ counterpartId, messages: list }) => ({ counterpartId, messages: list }));
   return { current, earlier };
+}
+
+// ── Custody journal ─────────────────────────────────────────────────────────
+//
+// custody_days is what was AGREED; the journal (custody_log) is what each
+// parent says HAPPENED. Entries are append-only testimony, so nothing here
+// reconciles them into one truth: where the two parents' latest accounts of
+// the same exchange or day disagree, the answer is "disputed", and both
+// accounts are shown. Where only one parent has spoken, that account stands.
+
+export const EXCHANGE_KINDS = ["exchange_as_planned", "exchange_late", "exchange_missed"];
+
+/** Past transitions a parent might still want to record, most recent first.
+ *  Today is included: tonight's exchange is recorded tonight. */
+export function recentTransitions(custodyDays, todayStr, { days = 14 } = {}) {
+  const from = addDays(todayStr, -days);
+  return (custodyDays || [])
+    .filter((r) => r.is_transition && r.day >= from && r.day <= todayStr)
+    .sort((a, b) => toDayNumber(b.day) - toDayNumber(a.day));
+}
+
+/** Each author's most recent entry — a parent who recorded twice is taken at
+ *  their latest word, but never at the other parent's. */
+function latestPerAuthor(entries) {
+  const byAuthor = new Map();
+  for (const e of [...entries].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))) {
+    byAuthor.set(e.created_by, e);
+  }
+  return [...byAuthor.values()];
+}
+
+/**
+ * What the journal says about one child's exchange on one day.
+ * → { state: "unrecorded" | "disputed" | <exchange kind>, entries, responses, standing, current, acknowledged }
+ * "disputed" when the parents' latest accounts name different outcomes, or
+ * either has answered the other's entry with a dispute.
+ */
+export function exchangeOutcome(log, childId, day) {
+  const all = (log || []).filter((e) => e.child_id === childId && e.day === day);
+  const outcomes = all.filter((e) => EXCHANGE_KINDS.includes(e.kind));
+  if (!outcomes.length) return { state: "unrecorded", entries: [], responses: [], standing: [], current: [], acknowledged: false };
+  const latest = latestPerAuthor(outcomes);
+  const ids = new Set(outcomes.map((e) => e.id));
+  const responses = all.filter((e) => (e.kind === "acknowledge" || e.kind === "dispute") && ids.has(e.responds_to_id));
+  // Only the OTHER parent's answer changes what an entry is taken to say. The
+  // endpoint accepts any `responds_to_id`, so an author can answer their own
+  // entry; that answer stays on the record (`responses`) and settles nothing.
+  const byId = new Map(outcomes.map((e) => [e.id, e]));
+  const answers = responses.filter((r) => r.created_by !== byId.get(r.responds_to_id)?.created_by);
+  // Which answers still speak to what the author says NOW.
+  //
+  //  - An answer to the author's standing (latest) entry always does.
+  //  - A DISPUTE of an entry the author has since replaced still does while
+  //    the replacement makes the same claim: re-recording "didn't happen" does
+  //    not shake off the other parent's objection to it.
+  //  - Once the author has CHANGED their account, the dispute was of something
+  //    they no longer say, and it lapses; the record keeps it (`responses`).
+  //  - An acknowledgement vouches only for the entry it answers.
+  //
+  // And each answerer is taken at their latest word on each author: disputing
+  // an account and then acknowledging its replacement is an acknowledgement.
+  const standingByAuthor = new Map(latest.map((e) => [e.created_by, e]));
+  const live = new Map();   // `${answerer}\u0000${author}` → latest applicable answer
+  for (const r of [...answers].sort((x, y) => String(x.created_at).localeCompare(String(y.created_at)))) {
+    const target = byId.get(r.responds_to_id);
+    const standing = standingByAuthor.get(target.created_by);
+    const applies = target.id === standing.id || (r.kind === "dispute" && target.kind === standing.kind);
+    if (applies) live.set(`${r.created_by}\u0000${target.created_by}`, r);
+  }
+  const current = [...live.values()];
+  const disputed = new Set(latest.map((e) => e.kind)).size > 1 || current.some((r) => r.kind === "dispute");
+  return {
+    state: disputed ? "disputed" : latest[0].kind,
+    entries: outcomes,
+    responses,
+    // Each author's account as it stands (their latest entry), and the answers
+    // that still speak to those — what a screen offers corrections against.
+    standing: latest,
+    current,
+    acknowledged: !disputed && current.some((r) => r.kind === "acknowledge"),
+  };
+}
+
+/**
+ * Where the journal says a child actually was on a day, or null when nobody
+ * recorded anything. `parent_id` is null when the parents' latest accounts
+ * name different people (`disputed`).
+ */
+export function actualParentForDay(log, childId, day) {
+  // The `custody_facts` record requires `parent_id`, so this is belt and braces
+  // for a row that arrived some other way naming nobody. It records nothing
+  // about where the child was: counted, it would take the day away from whoever
+  // was planned and give it to no one.
+  const facts = (log || []).filter((e) => e.kind === "child_with" && e.parent_id && e.child_id === childId && e.day === day);
+  if (!facts.length) return null;
+  const latest = latestPerAuthor(facts);
+  const parents = new Set(latest.map((e) => e.parent_id));
+  return { parent_id: parents.size === 1 ? latest[0].parent_id : null, disputed: parents.size > 1, entries: facts };
+}
+
+/**
+ * Planned against recorded days with each parent for one child in one month
+ * ('YYYY-MM'). A day nobody recorded counts as it was planned; a day recorded
+ * as elsewhere counts for whoever was recorded; a disputed day counts for
+ * nobody and is tallied separately, so the totals never silently take a side.
+ * → { byParent: Map<parentId, { planned, recorded }>, recorded, disputed }
+ */
+export function parentingTimeSummary(custodyDays, log, childId, yearMonth) {
+  const byParent = new Map();
+  const bump = (pid, key) => {
+    if (!pid) return;
+    const c = byParent.get(pid) ?? { planned: 0, recorded: 0 };
+    c[key] += 1;
+    byParent.set(pid, c);
+  };
+  let recorded = 0, disputed = 0;
+  for (const row of custodyDays || []) {
+    if (row.child_id !== childId || !String(row.day).startsWith(yearMonth)) continue;
+    bump(row.parent_id, "planned");
+    const actual = actualParentForDay(log, childId, row.day);
+    if (actual?.disputed) { disputed += 1; continue; }
+    if (actual) recorded += 1;
+    bump(actual ? actual.parent_id : row.parent_id, "recorded");
+  }
+  return { byParent, recorded, disputed };
+}
+
+// ── Holiday schedules ───────────────────────────────────────────────────────
+//
+// A holiday schedule is a countersigned list of rules; the HUB works them out
+// into custody days when it projects (cycle_projection.recurring_exceptions).
+// Everything below is the same arithmetic done here for two display jobs only:
+// previewing a rule's next occurrence while a parent is writing or reading a
+// proposal, and drawing calendar months beyond the hub's projection horizon.
+// The hub's answer is the one that counts; the tests pin the two to the same
+// dates so this cannot quietly drift from it.
+
+/** Starting points a parent picks from. `even`/`odd` are party tags ("a"/"b")
+ *  or null for "the regular schedule stands"; `on` is whether it starts ticked. */
+export const HOLIDAY_PRESETS = [
+  { id: "new-years-day", label: "New Year's Day", kind: "fixed", month: 1, day: 1, on: false },
+  { id: "mlk-day", label: "Martin Luther King Jr. Day", kind: "nth_weekday", month: 1, week: 3, weekday: 1, on: false },
+  { id: "presidents-day", label: "Presidents' Day", kind: "nth_weekday", month: 2, week: 3, weekday: 1, on: false },
+  { id: "easter", label: "Easter weekend", kind: "easter", offset_days: -2, length_days: 3, on: true },
+  // Unticked, both: the app does not know which parent is which, and a default
+  // that gave either day to the wrong one would be proposed by anyone who
+  // accepted the list as offered.
+  { id: "mothers-day", label: "Mother's Day", kind: "nth_weekday", month: 5, week: 2, weekday: 0, on: false, same: true },
+  { id: "memorial-day", label: "Memorial Day", kind: "nth_weekday", month: 5, week: -1, weekday: 1, on: false },
+  { id: "fathers-day", label: "Father's Day", kind: "nth_weekday", month: 6, week: 3, weekday: 0, on: false, same: true },
+  { id: "independence-day", label: "Independence Day", kind: "fixed", month: 7, day: 4, on: true },
+  { id: "labor-day", label: "Labor Day", kind: "nth_weekday", month: 9, week: 1, weekday: 1, on: false },
+  { id: "halloween", label: "Halloween", kind: "fixed", month: 10, day: 31, on: true },
+  { id: "thanksgiving", label: "Thanksgiving", kind: "nth_weekday", month: 11, week: 4, weekday: 4, length_days: 4, on: true },
+  { id: "christmas-eve", label: "Christmas Eve", kind: "fixed", month: 12, day: 24, on: true },
+  { id: "christmas-day", label: "Christmas Day", kind: "fixed", month: 12, day: 25, on: true },
+  { id: "winter-break", label: "Winter break", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, on: false },
+];
+
+export const MAX_HOLIDAY_RULES = 40;
+const RULE_FIELDS = ["id", "label", "kind", "month", "day", "week", "weekday", "offset_days", "start", "end", "length_days", "even_years", "odd_years", "exchange_time"];
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const ORDINALS = { 1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", "-1": "last" };
+
+const daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+const ymd = (year, month, day) =>
+  `${year}-${String(month).padStart(2, "0")}-${String(Math.min(day, daysInMonth(year, month))).padStart(2, "0")}`;
+
+/** Easter Sunday of a Gregorian year → { month, day }. */
+export function easterSunday(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return { month: Math.floor((h + l - 7 * m + 114) / 31), day: ((h + l - 7 * m + 114) % 31) + 1 };
+}
+
+/** The inclusive { start, end } dates a rule covers when it STARTS in `year`,
+ *  or null when it has none that year. Mirrors the hub's `ruleSpan`. */
+export function holidaySpan(rule, year) {
+  const length = (rule.length_days ?? 1) - 1;
+  let start;
+  if (rule.kind === "fixed") start = toDayNumber(ymd(year, rule.month, rule.day));
+  else if (rule.kind === "nth_weekday") {
+    const first = toDayNumber(ymd(year, rule.month, 1));
+    const last = toDayNumber(ymd(year, rule.month, 31));
+    // Day 0 of the epoch is a Thursday.
+    if (rule.week === -1) start = last - mod(mod(last + 4, 7) - rule.weekday, 7);
+    else {
+      start = first + mod(rule.weekday - mod(first + 4, 7), 7) + (rule.week - 1) * 7;
+      if (start > last) return null;
+    }
+  } else if (rule.kind === "easter") {
+    const { month, day } = easterSunday(year);
+    start = toDayNumber(ymd(year, month, day)) + (rule.offset_days ?? 0);
+  } else if (rule.kind === "range") {
+    start = toDayNumber(ymd(year, rule.start.month, rule.start.day));
+    let end = toDayNumber(ymd(year, rule.end.month, rule.end.day));
+    if (end < start) end = toDayNumber(ymd(year + 1, rule.end.month, rule.end.day));
+    return { start: fromDayNumber(start), end: fromDayNumber(end) };
+  } else return null;
+  return { start: fromDayNumber(start), end: fromDayNumber(start + length) };
+}
+
+const intIn = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+const monthDayReadable = (p) => !!p && typeof p === "object" && intIn(p.month, 1, 12) && intIn(p.day, 1, 31);
+
+const optionalInt = (value, min, max) => value === undefined || intIn(value, min, max);
+/** A party tag as the agreed document may carry it: one of the projection's
+ *  two, or null for "the regular schedule stands". The key must be present. */
+const tagReadable = (tag) => tag === null || tag === "a" || tag === "b";
+
+/**
+ * Whether the hub would read this rule — its RecurringRule schema, restated.
+ * Every bound here is the schema's, no tighter and no looser: looser, and a
+ * proposal this app draws as sound is refused when the other parent
+ * countersigns it; tighter, and an agreed schedule vanishes from this view.
+ */
+export function holidayRuleReadable(rule) {
+  if (!rule || typeof rule !== "object") return false;
+  if (typeof rule.id !== "string" || !rule.id || rule.id.length > 64) return false;
+  if (typeof rule.label !== "string" || !rule.label || rule.label.length > 80) return false;
+  if (!tagReadable(rule.even_years) || !tagReadable(rule.odd_years)) return false;
+  if (rule.exchange_time !== undefined && !(typeof rule.exchange_time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(rule.exchange_time))) return false;
+  // The schema bounds every field it knows, whichever kind carries it.
+  if (!optionalInt(rule.month, 1, 12) || !optionalInt(rule.day, 1, 31) || !optionalInt(rule.week, -1, 5)
+    || !optionalInt(rule.weekday, 0, 6) || !optionalInt(rule.offset_days, -70, 70) || !optionalInt(rule.length_days, 1, 31)) return false;
+  if ((rule.start !== undefined && !monthDayReadable(rule.start)) || (rule.end !== undefined && !monthDayReadable(rule.end))) return false;
+  if (rule.kind === "fixed") return monthDayReadable(rule);
+  if (rule.kind === "nth_weekday") {
+    return intIn(rule.month, 1, 12) && intIn(rule.weekday, 0, 6) && intIn(rule.week, -1, 5) && rule.week !== 0;
+  }
+  // The offset is required of an Easter rule, even when it is 0.
+  if (rule.kind === "easter") return intIn(rule.offset_days, -70, 70);
+  if (rule.kind === "range") return monthDayReadable(rule.start) && monthDayReadable(rule.end);
+  return false;
+}
+
+/**
+ * A version's rules as an array, or [] for anything unreadable. One rule that
+ * cannot be read empties the whole document, as it does on the hub — which
+ * never agrees such a document, so this only ever applies to a proposal. It is
+ * what keeps a malformed proposal drawable (and so declinable) instead of
+ * throwing out of the view that offers the Decline button.
+ */
+export function parseHolidayRules(value) {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(parsed) && parsed.every(holidayRuleReadable) ? parsed : [];
+  } catch { return []; }
+}
+
+/**
+ * Who a holiday schedule gives a day to: { parent_id, rule } or null. The
+ * shorter span wins where rules overlap and the later rule breaks a tie; a
+ * span belongs to the year it starts in. Mirrors the hub's `resolveRecurring`.
+ * `holiday` is a merged holiday version ({ rules, parent_a_id, parent_b_id }).
+ */
+export function holidayForDate(holiday, dateStr) {
+  if (!holiday) return null;
+  const rules = parseHolidayRules(holiday.rules);
+  const parties = { a: holiday.parent_a_id, b: holiday.parent_b_id };
+  const day = toDayNumber(dateStr);
+  const year = Number(String(dateStr).slice(0, 4));
+  let winner = null;
+  rules.forEach((rule, index) => {
+    for (const y of [year - 1, year]) {
+      const span = holidaySpan(rule, y);
+      if (!span) continue;
+      const s = toDayNumber(span.start), e = toDayNumber(span.end);
+      if (day < s || day > e) continue;
+      const parent_id = parties[y % 2 === 0 ? rule.even_years : rule.odd_years];
+      if (!parent_id) continue;
+      const length = e - s;
+      if (!winner || length < winner.length || (length === winner.length && index >= winner.index)) {
+        winner = { parent_id, rule, length, index };
+      }
+    }
+  });
+  return winner ? { parent_id: winner.parent_id, rule: winner.rule } : null;
+}
+
+/** The next time a rule gives someone the day, from `todayStr` on:
+ *  { start, end, parent_id } or null. Looks three years ahead. */
+export function nextHolidayOccurrence(rule, parties, todayStr) {
+  const year = Number(String(todayStr).slice(0, 4));
+  for (let y = year - 1; y <= year + 3; y++) {
+    const span = holidaySpan(rule, y);
+    if (!span || span.end < todayStr) continue;
+    const parent_id = parties[y % 2 === 0 ? rule.even_years : rule.odd_years];
+    if (!parent_id) continue;
+    return { ...span, parent_id };
+  }
+  return null;
+}
+
+/** "the fourth Thursday of November, for 4 days" — when a rule falls, in words. */
+export function describeHolidayRule(rule) {
+  const length = rule.length_days > 1 ? `, for ${rule.length_days} days` : "";
+  if (rule.kind === "fixed") return `${MONTHS[rule.month - 1]} ${rule.day}${length}`;
+  if (rule.kind === "nth_weekday") return `the ${ORDINALS[rule.week]} ${WEEKDAYS[rule.weekday]} of ${MONTHS[rule.month - 1]}${length}`;
+  if (rule.kind === "easter") {
+    const off = rule.offset_days ?? 0;
+    const from = off === 0 ? "Easter Sunday" : `${Math.abs(off)} day${Math.abs(off) === 1 ? "" : "s"} ${off < 0 ? "before" : "after"} Easter Sunday`;
+    return `${from}${length}`;
+  }
+  if (rule.kind === "range") return `${MONTHS[rule.start.month - 1]} ${rule.start.day} to ${MONTHS[rule.end.month - 1]} ${rule.end.day}`;
+  return "";
+}
+
+/** Only the fields the agreed document carries — editor bookkeeping (`on`,
+ *  `same`) never reaches a proposal. */
+export function cleanHolidayRule(rule) {
+  const out = {};
+  for (const field of RULE_FIELDS) {
+    if (rule[field] !== undefined && rule[field] !== "") out[field] = rule[field];
+  }
+  out.even_years = rule.even_years ?? null;
+  out.odd_years = rule.odd_years ?? null;
+  return out;
+}
+
+/** Why a list of rules cannot be proposed, as a sentence, or null when it can. */
+export function holidayRulesBlocker(rules, { retiring = false } = {}) {
+  // An empty schedule is how one in force is retired — agreed like any other,
+  // and naming no days. With nothing in force there is nothing to retire.
+  if (!rules.length) return retiring ? null : "Choose at least one holiday.";
+  if (rules.length > MAX_HOLIDAY_RULES) return `A holiday schedule can hold at most ${MAX_HOLIDAY_RULES} entries.`;
+  const ids = new Set();
+  for (const rule of rules) {
+    if (!rule.label || !String(rule.label).trim()) return "Every entry needs a name.";
+    if (String(rule.label).length > 80) return `"${rule.label}" is too long a name.`;
+    if (ids.has(rule.id)) return `"${rule.label}" is listed twice.`;
+    ids.add(rule.id);
+    if (!rule.even_years && !rule.odd_years) return `Choose who has ${rule.label}, or untick it.`;
+    // Whole numbers only: the hub's schema refuses "1.5", and it refuses it at
+    // the lock — on the other parent's countersignature, not here.
+    const ok = (p) => monthDayReadable(p) && p.day <= daysInMonth(2028, p.month);
+    if (rule.kind === "fixed" && !ok(rule)) return `${rule.label} needs a real date.`;
+    if (rule.kind === "range" && (!ok(rule.start) || !ok(rule.end))) return `${rule.label} needs a real start and end date.`;
+    if (!holidayRuleReadable(rule)) return `${rule.label} can't be worked out as dates.`;
+  }
+  return null;
+}
+
+/**
+ * The proposal the hub is sent, or null when it is not complete.
+ *
+ * `retiring`: whether an empty list is allowed — it ends a schedule that is in
+ * force. A caller that knows says so; one that does not is taken to be amending
+ * something in force whenever it names a base version. The two differ after a
+ * schedule has been retired: the retired (empty) version is still the base the
+ * next proposal must name, and there is nothing left to end.
+ */
+export function holidayProposalTerms({ child_id, parent_a_id, parent_b_id, rules, rationale, base_version_id, retiring = !!base_version_id }) {
+  if (!child_id || !parent_a_id || !parent_b_id || parent_a_id === parent_b_id) return null;
+  const cleaned = (rules || []).map(cleanHolidayRule);
+  if (holidayRulesBlocker(cleaned, { retiring })) return null;
+  return {
+    child_id, parent_a_id, parent_b_id,
+    rules: JSON.stringify(cleaned),
+    rationale: rationale || null,
+    base_version_id: base_version_id ?? null,
+  };
+}
+
+/** The amendment row and the hub's agreement row as one record. Frozen terms
+ *  win once the hub has written them (`rules` is written only by the freeze). */
+export function mergeHolidayVersion(amendment = {}, agreement) {
+  const bound = !!agreement && agreement.rules != null;
+  const terms = bound ? {
+    child_id: agreement.child_id,
+    parent_a_id: agreement.parent_a_id,
+    parent_b_id: agreement.parent_b_id,
+    rules: agreement.rules,
+    rationale: agreement.rationale,
+    base_version_id: agreement.base_version_id,
+    proposed_by: agreement.proposed_by,
+  } : {};
+  return {
+    ...amendment,
+    ...terms,
+    id: agreement?.id ?? amendment.id,
+    status: agreement?.status ?? "draft",
+    household_b_id: agreement?.household_b_id ?? amendment.household_b_id ?? null,
+    household_a_agreed: agreement?.household_a_agreed ? 1 : 0,
+    household_b_agreed: agreement?.household_b_agreed ? 1 : 0,
+    agreed_at: agreement?.agreed_at ?? null,
+  };
 }

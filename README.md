@@ -10,6 +10,9 @@ Shared custody coordination for split households — per-child standing schedule
 - Countersigned one-off swaps.
 - Every agreed version is kept.
 - An audited message log with content checksums, and handoff notes.
+- A countersigned holiday schedule: rules such as "Thanksgiving, even years with one parent, odd years with the other" agreed once and applied every year, above the rotation and beneath any countersigned swap.
+- A custody journal: each parent records whether an exchange happened as planned, late or not at all, and where a child actually was. Entries are never edited; the other parent acknowledges or disputes with an entry of their own.
+- Records: every report opens as a stamped document, separately or as one full record.
 - Custody days flow to the shared calendar and Today view.
 
 ## Install
