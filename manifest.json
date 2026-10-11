@@ -621,15 +621,20 @@
       {
         "id": "message_log",
         "title": "Message log",
-        "description": "Every message between the co-parents, oldest first. Append-only — messages cannot be edited or deleted.",
+        "description": "Every message between the co-parents, oldest first. Append-only — messages cannot be edited or deleted. First viewed is set by the hub when the recipient first opens the Messages thread with that message unread; the sender never writes it, it is never cleared, and opening this record does not set it.",
         "source": {
           "kind": "sql",
-          "query": "SELECT sent_at AS sent_at, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND substr(sent_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY sent_at"
+          "query": "SELECT sent_at AS sent_at, read_at AS first_viewed, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND substr(sent_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY sent_at"
         },
         "columns": [
           {
             "key": "sent_at",
             "label": "Sent",
+            "format": "datetime"
+          },
+          {
+            "key": "first_viewed",
+            "label": "First viewed",
             "format": "datetime"
           },
           {

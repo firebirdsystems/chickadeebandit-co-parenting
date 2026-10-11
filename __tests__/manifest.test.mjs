@@ -151,6 +151,16 @@ describe("manifest ↔ app agreement", async () => {
     }
   });
 
+  // The receipt is stamped by the hub's paired-message endpoint (recipient-only,
+  // server time, never cleared), so the record can show when the other parent
+  // first saw each message — the fact a reader of the log asks about first.
+  it("records when the recipient first viewed each message", () => {
+    const view = manifest.reports.views.find((v) => v.id === "message_log");
+    expect(view.source.query).toContain("read_at AS first_viewed");
+    expect(view.columns.find((c) => c.key === "first_viewed")).toEqual({ key: "first_viewed", label: "First viewed", format: "datetime" });
+    expect(view.description).toMatch(/set by the hub/);
+  });
+
   // `swap_requests.status` is never told about a lock and stays editable; the
   // agreement row is the record of how a swap was answered.
   it("reports a swap's outcome from the agreement, not the request", () => {

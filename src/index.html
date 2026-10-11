@@ -110,6 +110,8 @@
     .hint { font-size: 0.78rem; color: var(--hub-text-muted, #6b7280); margin-top: -4px; margin-bottom: 10px; }
     .note-cat { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 5px;
       background: var(--hub-bg, #eef0f3); color: var(--hub-text-muted, #4b5563); }
+    .load-error { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #b91c1c); font-size: 0.9rem; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .load-error-retry { background: none; border: 1px solid currentColor; border-radius: 8px; padding: 5px 10px; font: inherit; font-weight: 600; color: inherit; cursor: pointer; flex-shrink: 0; }
     .search-row { margin-bottom: 12px; }
     .search-input {
       width: 100%; border: 1.5px solid var(--border-mid, var(--border, #d1d5db));
@@ -164,8 +166,9 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sql, params }),
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `DB error ${res.status}`);
-      return res.json();
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || typeof json !== "object" || json.error) throw new Error(json?.error || "Couldn’t reach the hub. Try again.");
+      return json;
     }
 
     // The HOUSEHOLD's calendar day, not the viewer device's. These dates are
@@ -224,6 +227,8 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
      *  schedule yet" — to a child, and to a parent about to set one up twice. */
     let custodyReadFailed = false;
     let versionsReadFailed = false;
+    // The FIRST load failed: nothing on any tab is known, so no tab is drawn.
+    let loadFailed = false;
     let view = "schedule";
     let currentChildId = null;
     let calMonth = null;                         // { y, m } (m is 0-based)
@@ -510,8 +515,8 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           body: JSON.stringify(body),
         }),
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.error) throw new Error(json.error || fallbackError);
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json || typeof json !== "object" || json.error) throw new Error(json?.error || fallbackError);
       return json;
     }
 
@@ -610,11 +615,19 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       ["swaps",    "swap",      "Swaps"],
       ["messages", "messages",  "Messages"],
       ["handoffs", "checklist", "Handoffs"],
+      ["records",  "seal-document", "Records"],
       ["setup",    "gear",      "Setup"],
     ];
 
     function render() {
       const tabsEl = document.getElementById("tabs");
+      if (loadFailed) {
+        tabsEl.innerHTML = "";
+        const failed = document.getElementById("content");
+        failed.innerHTML = `<div class="load-error" data-testid="load-error" role="alert"><span>Couldn’t load the custody schedule.</span> <button type="button" class="load-error-retry" data-testid="load-retry">Try again</button></div>`;
+        failed.querySelector('[data-testid="load-retry"]').addEventListener("click", firstLoad);
+        return;
+      }
       tabsEl.innerHTML = TABS.map(([id, icon, label]) =>
         `<button class="tab ${view === id ? "active" : ""}" data-tab="${id}">${glyph(icon)} ${esc(label)}</button>`
       ).join("");
@@ -631,7 +644,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
 
       const el = document.getElementById("content");
       ({ schedule: renderSchedule, swaps: renderSwaps, messages: renderMessages,
-         handoffs: renderHandoffs, setup: renderSetup }[view] ?? renderSchedule)(el);
+         handoffs: renderHandoffs, records: renderRecords, setup: renderSetup }[view] ?? renderSchedule)(el);
     }
 
     // ── Schedule view ────────────────────────────────────────────────────────
@@ -1163,7 +1176,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         // Only on your own messages: "Read" on something you received tells you
         // what you already know, and on a permanent record the useful fact is
         // whether the other parent has seen what you sent.
-        const receipt = mine && m.read_at ? ` · Read` : "";
+        const receipt = mine && m.read_at ? ` · Read ${esc(fmtDateTime(m.read_at))}` : "";
         return `<div class="msg ${mine ? "mine" : "theirs"}">
           <div>${esc(m.body)}</div>
           <div class="meta">${esc(mine ? "You" : memberName(m.author_id))} · ${esc(fmtDateTime(m.sent_at))}${receipt}</div>
@@ -1226,6 +1239,133 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
     function fmtDateTime(iso) {
       const d = new Date(iso);
       return isNaN(d) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+
+    // ── Records view ─────────────────────────────────────────────────────────
+    // The hub renders the documents (GET api/reports). Each runs as the
+    // signed-in parent through the same row policies as this app's own reads,
+    // so a document cannot hold a row the parent could not already see, and
+    // each is stamped with who generated it, when, a row count and a SHA-256
+    // checksum. The full record binds every report for one date range into a
+    // single print-styled document with a cover page; "Save as PDF" from the
+    // print dialog is the PDF. Opened in a new tab, not this frame: the
+    // document carries its own strict CSP and a CSV arrives as an attachment.
+    const REPORTS_URL = window.__REPORTS_URL ?? "";
+    let reportViews = null, reportFullRecord = null, reportsLoading = null;
+    /** A list that FAILED to load is not an empty list (see custodyReadFailed):
+     *  "No records are offered" would be a false statement about the record. */
+    let reportsFailed = false;
+    let recordFrom = "", recordTo = "";
+    /** Until a parent picks a date the range is the default, and the default
+     *  ends "today" — so it is recomputed each time it is used, not kept from
+     *  whenever the tab was first drawn. Once they pick, it is theirs, including
+     *  a cleared bound (which asks for every date on that side). */
+    let recordRangeEdited = false;
+
+    function loadReports() {
+      if (!REPORTS_URL || reportViews || reportsLoading) return;
+      reportsFailed = false;
+      reportsLoading = (async () => {
+        try {
+          const res = await fetch(REPORTS_URL, { headers: { Accept: "application/json" } });
+          if (!res.ok) throw new Error(`reports ${res.status}`);
+          const body = await res.json();
+          reportViews = Array.isArray(body?.views) ? body.views : [];
+          reportFullRecord = body?.full_record ?? null;
+        } catch {
+          reportsFailed = true;
+        } finally {
+          reportsLoading = null;
+        }
+        // Every outcome re-renders: the view is showing "Loading records…".
+        if (view === "records") render();
+      })();
+    }
+
+    // The default is the WHOLE record up to today: From is left empty, which
+    // the hub reads as "from the beginning". Any computed start (a year back,
+    // the earliest schedule anchor) is a guess at where the record begins, and
+    // a wrong guess silently leaves the oldest messages or custody days out of
+    // a document that looks complete. A parent who wants a period picks one.
+    //
+    // The end is the LATER of the household's today and UTC's. Messages, swap
+    // requests and schedule versions are stamped by the server in UTC and the
+    // reports filter on that UTC date, so west of Greenwich an evening message
+    // already carries tomorrow's date: ending at the local today would leave
+    // tonight's messages out of a record generated tonight. The cost is that
+    // the custody record can then include tomorrow's scheduled day, which is
+    // the agreed schedule and labelled as such — an extra true row, where the
+    // alternative is a missing one.
+    function defaultRecordRange() {
+      const now = new Date();
+      const localToday = todayStr(now), utcToday = now.toISOString().slice(0, 10);
+      return { from: "", to: utcToday > localToday ? utcToday : localToday };
+    }
+
+    // Opening a record does NOT set "First viewed". The hub's receipt covers
+    // every unread message addressed to the caller and is never cleared, while
+    // a document prints one date range and can fail to render — firing it from
+    // here would stamp messages nobody was shown. The receipt is earned in the
+    // Messages thread only, and the message log's description says so.
+    function openReport(id, format) {
+      // A tab left open past midnight (the household's or UTC's) still shows
+      // yesterday as the default end; the document must not stop there.
+      if (!recordRangeEdited) {
+        ({ from: recordFrom, to: recordTo } = defaultRecordRange());
+        const fromEl = document.getElementById("rec-from"), toEl = document.getElementById("rec-to");
+        if (fromEl) fromEl.value = recordFrom;
+        if (toEl) toEl.value = recordTo;
+      }
+      // The hub refuses an inverted range; say so here rather than in a new tab.
+      if (recordFrom && recordTo && recordFrom > recordTo) { hubAlert("From must not be later than To."); return; }
+      const url = new URL(`${REPORTS_URL}/${encodeURIComponent(id)}`, window.location.href);
+      url.searchParams.set("format", format);
+      if (recordFrom) url.searchParams.set("from", recordFrom);
+      if (recordTo) url.searchParams.set("to", recordTo);
+      window.open(url.toString(), "_blank", "noopener");
+    }
+
+    function renderRecords(el) {
+      if (!canManage()) { el.innerHTML = `<div class="empty">Records are available to the parents.</div>`; return; }
+      if (DEMO || !REPORTS_URL) { el.innerHTML = `<div class="empty">Records are generated by the hub once Co-Parenting is installed in a household or space.</div>`; return; }
+      if (!reportViews && reportsFailed) {
+        el.innerHTML = `<div class="empty">Couldn’t load the records list.
+          <div style="margin-top:8px"><button class="btn btn-primary" data-testid="records-retry">Try again</button></div></div>`;
+        el.querySelector("[data-testid=records-retry]").addEventListener("click", () => { reportsFailed = false; render(); });
+        return;
+      }
+      if (!reportViews) { loadReports(); el.innerHTML = `<div class="empty">Loading records…</div>`; return; }
+      if (!recordRangeEdited) ({ from: recordFrom, to: recordTo } = defaultRecordRange());
+
+      const row = (id, title, desc, actions) => `
+        <div class="card" data-testid="record-row" data-record="${esc(id)}">
+          <div class="spread">
+            <div><b>${esc(title)}</b>${desc ? `<div class="muted">${esc(desc)}</div>` : ""}</div>
+            <div>${actions}</div>
+          </div>
+        </div>`;
+      const btn = (id, format, label, primary) =>
+        `<button class="btn btn-sm${primary ? " btn-primary" : ""}" data-report="${esc(id)}" data-format="${format}">${esc(label)}</button>`;
+
+      el.innerHTML = `
+        <div class="card">
+          <p class="muted">Each document is generated by the hub as you, from the records you can see here, and is stamped with who generated it, when, a row count and a SHA-256 checksum. Open one, then use Print / Save as PDF. Times stamped by the server are printed in UTC, and the dates below select those records by their UTC date. Leave From empty for the whole record from the beginning.</p>
+          <div class="row">
+            <label class="field"><span>From</span><input type="date" id="rec-from" value="${esc(recordFrom)}"></label>
+            <label class="field"><span>To</span><input type="date" id="rec-to" value="${esc(recordTo)}"></label>
+          </div>
+        </div>
+        ${reportFullRecord ? row(reportFullRecord.id, reportFullRecord.title,
+          "Every report below for the dates chosen, in one document with a cover page, a checksum per section and a package checksum. Open it and save it as a PDF.",
+          btn(reportFullRecord.id, "html", "Open full record", true)) : ""}
+        ${reportViews.map(v => row(v.id, v.title, v.description,
+          btn(v.id, "html", "Open") + " " + btn(v.id, "csv", "CSV"))).join("")}
+        ${!reportViews.length && !reportFullRecord ? `<div class="empty">No records are offered.</div>` : ""}`;
+
+      el.querySelector("#rec-from").addEventListener("change", e => { recordFrom = e.target.value; recordRangeEdited = true; });
+      el.querySelector("#rec-to").addEventListener("change", e => { recordTo = e.target.value; recordRangeEdited = true; });
+      el.querySelectorAll("[data-report]").forEach(b =>
+        b.addEventListener("click", () => openReport(b.dataset.report, b.dataset.format)));
     }
 
     // ── Handoffs view ────────────────────────────────────────────────────────
@@ -2477,16 +2617,20 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       if (document.visibilityState === "visible" && view === "messages") refreshMessages();
     });
 
-    (async () => {
+    async function firstLoad() {
       // Members, the partner link and the data are independent requests; only
       // loadData's adult-only reads wait on members (see loadData).
       const membersReady = loadMembers();
       await Promise.all([membersReady, loadPartner(), loadData(membersReady)]);
+      // loadData swallows each read's failure, since some are refused by policy
+      // for a child; these two are the ones it already knows to be real.
+      loadFailed = custodyReadFailed || versionsReadFailed;
       handleDeepLink();
       render();
       // A deep link can land straight on the thread (notifications point here).
-      if (view === "messages") refreshMessages();
-    })();
+      if (view === "messages" && !loadFailed) refreshMessages();
+    }
+    firstLoad();
   </script>
 </body>
 </html>
