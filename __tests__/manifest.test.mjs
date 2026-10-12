@@ -115,7 +115,7 @@ describe("manifest.json", () => {
 // The app cannot read its own manifest at runtime, so each of these lives in
 // two places by necessity. Pinned here so they cannot drift apart silently.
 describe("manifest ↔ app agreement", async () => {
-  const { SWAP_HORIZON_DAYS, CUSTODY_LOOKBACK_DAYS, SCHEDULE_SNAPSHOT_COLUMNS } = await import("../src/logic.js");
+  const { SWAP_HORIZON_DAYS, CUSTODY_LOOKBACK_DAYS, SCHEDULE_SNAPSHOT_COLUMNS, HOLIDAY_SNAPSHOT_COLUMNS } = await import("../src/logic.js");
 
   // A swap starting beyond the projection horizon can be requested and never
   // countersigned — the hub refuses to lock one that moves no projected day.
@@ -210,10 +210,11 @@ describe("manifest ↔ app agreement", async () => {
     expect(rec.write_acl).toEqual({ require_role: "adult" });
     expect(rec.required_columns).toEqual(["child_id", "day", "kind"]);
     expect(rec.allowed_values.kind).toEqual(["exchange_as_planned", "exchange_late", "exchange_missed"]);
-    expect(rec.value_formats).toEqual({ day: "date", actual_time: "time" });
+    // A record of what happened: the hub refuses a day that has not begun.
+    expect(rec.value_formats).toEqual({ day: "date_not_future", actual_time: "time" });
     // "Where the child was" names a parent or is not recorded at all.
     const facts = manifest.append_only_records.custody_facts;
-    expect(facts).toMatchObject({ table: "custody_log", write_acl: { require_role: "adult" }, value_formats: { day: "date" } });
+    expect(facts).toMatchObject({ table: "custody_log", write_acl: { require_role: "adult" }, value_formats: { day: "date_not_future" } });
     expect(facts.allowed_values.kind).toEqual(["child_with"]);
     expect(facts.required_columns).toContain("parent_id");
     expect(rec.allowed_columns).not.toContain("parent_id");
@@ -230,7 +231,7 @@ describe("manifest ↔ app agreement", async () => {
     // Only an exchange account is answerable — never an answer, never a fact.
     expect(answers.parent_status_column).toBe("kind");
     expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with"]);
-    expect(answers.value_formats).toEqual({ day: "date" });
+    expect(answers.value_formats).toEqual({ day: "date_not_future" });
     expect(answers.required_columns).toContain("responds_to_id");
     expect(answers.allowed_columns).not.toContain("parent_id");
     expect(manifest.agreements.custody_log).toBeUndefined();
@@ -299,6 +300,24 @@ describe("manifest ↔ app agreement", async () => {
     expect(config.late_signature).toEqual({ signed_at_column: "countersigned_at" });
     const migration = readFileSync(join(__dirname, "../migrations/008_schedule_countersigned_at.sql"), "utf-8");
     expect(migration).toContain("ADD COLUMN countersigned_at TEXT");
+  });
+
+  it("signs a holiday schedule already in force against exactly the manifest's snapshot columns", () => {
+    const config = manifest.agreements.holiday_versions;
+    expect([...HOLIDAY_SNAPSHOT_COLUMNS].sort()).toEqual([...config.snapshot_columns].sort());
+    expect(config.late_signature).toEqual({ signed_at_column: "countersigned_at" });
+    const migration = readFileSync(join(__dirname, "../migrations/010_holiday_schedules.sql"), "utf-8");
+    expect(migration).toMatch(/holiday_versions \([^;]*countersigned_at\s+TEXT/);
+  });
+
+  // The record a court is handed names each holiday in words, not as JSON.
+  it("prints the holiday history one rule to a line", () => {
+    const view = manifest.reports.views.find((v) => v.id === "holiday_schedule");
+    expect(view.columns.map((c) => c.key)).toEqual([
+      "agreed_at", "child", "holiday", "falls", "even_years", "odd_years", "exchange_time", "proposed_by", "rationale", "state",
+    ]);
+    expect(view.source.query).toContain("json_each(");
+    expect(view.source.query).not.toContain("rules AS rules");
   });
 
   // One definition of a proposal's terms, for the form and the draft alike.

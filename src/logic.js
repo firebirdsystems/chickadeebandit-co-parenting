@@ -1892,5 +1892,18 @@ export function mergeHolidayVersion(amendment = {}, agreement) {
     household_a_agreed: agreement?.household_a_agreed ? 1 : 0,
     household_b_agreed: agreement?.household_b_agreed ? 1 : 0,
     agreed_at: agreement?.agreed_at ?? null,
+    // Set only when the second parent signed AFTER it took effect.
+    countersigned_at: agreement?.countersigned_at ?? null,
   };
+}
+
+/** The terms the hub froze onto an agreed holiday schedule — the manifest's
+ *  `snapshot_columns`, pinned to it by a manifest test. Named back to the hub
+ *  to sign one that is already in force, as `scheduleSnapshot` is. */
+export const HOLIDAY_SNAPSHOT_COLUMNS = [
+  "proposed_by", "child_id", "parent_a_id", "parent_b_id", "rules", "rationale", "base_version_id",
+];
+
+export function holidaySnapshot(version) {
+  return Object.fromEntries(HOLIDAY_SNAPSHOT_COLUMNS.map((column) => [column, version?.[column] ?? null]));
 }

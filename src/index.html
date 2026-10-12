@@ -145,7 +145,7 @@
       effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
       nextTransition, upcomingTransitions, groupNotesByTransition, recentTransitions, exchangeOutcome, actualParentForDay, parentingTimeSummary,
       HOLIDAY_PRESETS, holidayForDate, nextHolidayOccurrence, describeHolidayRule, parseHolidayRules,
-      holidayRulesBlocker, holidayProposalTerms, mergeHolidayVersion,
+      holidayRulesBlocker, holidayProposalTerms, mergeHolidayVersion, holidaySnapshot,
       notesForTransition, searchableFields, describeScheduleChange,
       soleCoParentCandidate, lockedSwapOverrides, mergeSwapRecord, canMemberAgreeToSwap,
       pairingState, partitionMessagesBySession, counterpartOf,
@@ -1402,9 +1402,15 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
               <span class="badge b-locked">In force</span>
             </div>
             <div class="muted">${versionSignatures(agreed) === "both"
-              ? `Countersigned ${esc(fmtDateTime(agreed.agreed_at))}`
-              : `In force since ${esc(fmtDateTime(agreed.agreed_at))} on one parent's signature`}</div>
+              ? (agreed.countersigned_at
+                ? `In force since ${esc(fmtDateTime(agreed.agreed_at))} · countersigned ${esc(fmtDateTime(agreed.countersigned_at))}`
+                : `Countersigned ${esc(fmtDateTime(agreed.agreed_at))}`)
+              : `In force since ${esc(fmtDateTime(agreed.agreed_at))} on one parent's signature — nobody else was here to countersign it`}</div>
             ${holidayRulesHtml(agreed)}
+            ${unilateralStance(agreed, me?.id) === "unsigned_parent" ? `
+              <div class="muted" style="margin-top:8px">${glyph("warning")} ${esc(agreed.proposed_by ? memberName(agreed.proposed_by) : "The other parent")} put this in force
+                on their signature alone. You have not signed it — countersign it if it is what you agreed, or propose changes.</div>
+              <div class="row" style="margin-top:8px"><button class="btn btn-primary btn-sm" data-latesignhol="${esc(agreed.id)}">Countersign</button></div>` : ""}
           </div>` : (pending ? "" : `
           <div class="empty" data-testid="holiday-empty"><div>${chickadee("nest", { size: 72 })}</div>${agreed ? "The holiday schedule was ended." : "No holiday schedule yet."}<br>
             <span class="muted">Until there is one, every day follows the regular rotation.</span></div>`)}
@@ -1416,6 +1422,7 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       el.querySelector("[data-newhol]")?.addEventListener("click", () => openHolidayModal(cid, agreed));
       el.querySelector("[data-signhol]")?.addEventListener("click", e => onSignHoliday(e.currentTarget.dataset.signhol, e.currentTarget));
       el.querySelector("[data-declinehol]")?.addEventListener("click", e => onDeclineHoliday(e.currentTarget.dataset.declinehol, e.currentTarget));
+      el.querySelector("[data-latesignhol]")?.addEventListener("click", e => onCountersignHolidayInForce(e.currentTarget.dataset.latesignhol));
     }
 
     /** The editor's working list: the agreed rules (ticked), then every preset
@@ -1522,9 +1529,13 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         }));
     }
 
-    function agreeHoliday(id, agreed, resolution) {
+    function agreeHoliday(id, agreed, resolution, expectedSnapshot) {
       return requestJson(`/run/${APP_ID}/api/agree`, {
-        body: { table: "holiday_versions", id, agreed, ...(resolution ? { resolution } : {}) },
+        body: {
+          table: "holiday_versions", id, agreed,
+          ...(resolution ? { resolution } : {}),
+          ...(expectedSnapshot ? { expected_snapshot: expectedSnapshot } : {}),
+        },
         fallbackError: "Could not record your decision",
       });
     }
@@ -1632,6 +1643,35 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
         }
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = "Countersign"; }
+        hubAlert(e.message);
+      }
+    }
+
+    // Sign a holiday schedule that is ALREADY in force on the other parent's
+    // signature alone. Same rules as onCountersignInForce: nothing about the
+    // schedule changes, the terms go back with the signature so the hub can
+    // refuse a stale screen, and there is no declining — only proposing changes.
+    async function onCountersignHolidayInForce(id) {
+      const holiday = holidayVersions.find(v => v.id === id);
+      if (!holiday) return;
+      const ok = await hubConfirm({
+        message: `Countersign ${memberName(holiday.child_id)}'s holiday schedule?`,
+        description: "It is already in force and stays exactly as it is; this records that you agree to it. "
+          + "If it is not what you agreed, cancel and propose changes instead.",
+        confirmLabel: "Countersign",
+      });
+      if (!ok) return;
+      try {
+        const result = await agreeHoliday(id, true, undefined, holidaySnapshot(holiday));
+        await loadData(); render();
+        if (result.late_signature) {
+          notifySchedule("Holiday schedule countersigned",
+            `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It was already in force and has not changed.`,
+            { view: "holidays" });
+        }
+      } catch (e) {
+        await loadData().catch(() => {});
+        render();
         hubAlert(e.message);
       }
     }
@@ -1978,6 +2018,11 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
           const r = await appendRecord(record, data);
           id = r.id ?? id;
         }
+        // A refresh that read the table after the hub stored this entry, and
+        // landed before the append's own answer did, has already adopted it.
+        // Replace that copy rather than add a second one: the same entry drawn
+        // twice reads as two accounts.
+        custodyLog = custodyLog.filter(e => e.id !== id);
         custodyLog.unshift({ id, parent_id: null, actual_time: null, responds_to_id: null, note: null, ...data, created_by: me?.id, created_at: now });
         journalVersion++;
         closeModal(); render();
@@ -2926,7 +2971,9 @@ let searchQ = "";       // in-app search (see logic.js searchableFields)
       if (!amendment) return;
       try {
         const result = await agreeSchedule(id, true);
-        if (result.already_agreed) {
+        // `already_agreed` with `locked` is a retry that finished the job (see
+        // onSignHoliday): only an unlocked row is still waiting on anyone.
+        if (result.already_agreed && !result.locked) {
           signedElsewhere.add(id);
           await loadData();
           render();

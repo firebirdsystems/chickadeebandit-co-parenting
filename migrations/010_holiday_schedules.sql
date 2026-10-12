@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__holiday_versions (
   household_b_agreed INTEGER NOT NULL DEFAULT 0,
   status           TEXT NOT NULL DEFAULT 'pending',
   agreed_at        TEXT,
+  -- Set only when the second parent signed AFTER the schedule took effect
+  -- (the manifest's late_signature), as on schedule_versions.
+  countersigned_at TEXT,
   updated_at       TEXT NOT NULL,
   -- Frozen terms (snapshot_columns), written by the hub at first signature.
   proposed_by      TEXT,
