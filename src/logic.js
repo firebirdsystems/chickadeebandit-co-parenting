@@ -1774,15 +1774,16 @@ export function holidayForDate(holiday, dateStr) {
       if (!span) continue;
       const s = toDayNumber(span.start), e = toDayNumber(span.end);
       if (day < s || day > e) continue;
-      const parent_id = parties[y % 2 === 0 ? rule.even_years : rule.odd_years];
-      if (!parent_id) continue;
+      // The winner first, its assignment second — as the hub does. A rule
+      // left to the ordinary rotation this year still wins its day, and the
+      // day then follows the rotation rather than a wider rule under it.
       const length = e - s;
       if (!winner || length < winner.length || (length === winner.length && index >= winner.index)) {
-        winner = { parent_id, rule, length, index };
+        winner = { parent_id: parties[y % 2 === 0 ? rule.even_years : rule.odd_years] || null, rule, length, index };
       }
     }
   });
-  return winner ? { parent_id: winner.parent_id, rule: winner.rule } : null;
+  return winner?.parent_id ? { parent_id: winner.parent_id, rule: winner.rule } : null;
 }
 
 /** The next time a rule gives someone the day, from `todayStr` on:

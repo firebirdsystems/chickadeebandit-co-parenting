@@ -2111,6 +2111,15 @@ describe("holidayForDate", () => {
       expect(holidayForDate(doc(rules), "2026-12-26").parent_id).toBe("mom");
     }
   });
+  it("leaves a day to the rotation when its most specific rule names nobody", () => {
+    const winter = { id: "w", label: "Winter break", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: "a", odd_years: "a" };
+    const xmas = { id: "x", label: "Christmas Day", kind: "fixed", month: 12, day: 25, even_years: null, odd_years: "b" };
+    for (const rules of [[winter, xmas], [xmas, winter]]) {
+      expect(holidayForDate(doc(rules), "2026-12-25")).toBeNull();
+      expect(holidayForDate(doc(rules), "2026-12-24").rule.label).toBe("Winter break");
+      expect(holidayForDate(doc(rules), "2027-12-25").parent_id).toBe("dad");
+    }
+  });
   it("keeps a span crossing New Year with the year it started in", () => {
     const winter = { id: "w", label: "Winter break", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: "a", odd_years: "b" };
     expect(holidayForDate(doc([winter]), "2027-01-02").parent_id).toBe("mom");
