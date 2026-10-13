@@ -740,6 +740,39 @@
           "as": "parent"
         }
       ]
+    },
+    {
+      "name": "the Messages tab points at the space's Messages",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"messages\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-testid=\"messages-card\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "in this space's Messages",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "part of the full record",
+          "as": "parent"
+        }
+      ]
     }
   ]
 }

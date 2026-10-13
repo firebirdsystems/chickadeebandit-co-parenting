@@ -1008,8 +1008,8 @@ export function notesForTransition(notes, childId, day) {
 /**
  * The one other adult who can only be the co-parent, or null.
  *
- * Pairing exists because the message log is `couple_scoped`, and it also names
- * the counterparty for swap requests and notifications. Making the user hunt
+ * Pairing names the counterparty for swap requests and notifications, and the
+ * Messages tab links to the conversation with them. Making the user hunt
  * for it in Setup is the friction; guessing it wrong would be far worse, so
  * this only answers when there is nothing to guess.
  *
@@ -1018,7 +1018,7 @@ export function notesForTransition(notes, childId, day) {
  * can draw. Unambiguity is: exactly one other adult who could reciprocate.
  * That is the two-parent case, i.e. the norm — and it deliberately returns null
  * once a third adult (a new spouse) is in the space, where picking wrong would
- * hand a private message log to the wrong person.
+ * send a custody swap request to the wrong person.
  *
  * Members with no login are excluded: pairing only takes effect when they name
  * you back, which an account-less row can never do.
@@ -1219,8 +1219,8 @@ export function amendmentStance(amendment, meId, alreadySigned = false) {
 /**
  * Who must be told about a standing-schedule change.
  *
- * NOT the pairing. Pairing is an in-app act that exists to open the private
- * message log, and it is entirely possible — common, even, early on — for two
+ * NOT the pairing. Pairing is an in-app act that names the swap counterparty,
+ * and it is entirely possible — common, even, early on — for two
  * co-parents to be full members of the space without having completed it. A
  * schedule amendment routed through the pairing would then reach nobody, which
  * is precisely the failure the plan forbids: "do not depend on partner
@@ -1421,36 +1421,16 @@ export function validateSwap(swap, todayStr, opts = {}) {
 }
 
 /**
- * Fields the in-app search matches against (see hub-sdk `searchMatch`).
- * The message log is permanent and grows for years — it is a record
- * both parents rely on, so finding an old message matters more here
- * than in an ordinary chat.
- */
-export function searchableFields(message, authorName = "") {
-  return [message.body, authorName];
-}
-
-/**
- * The other party on a message, from `meId`'s perspective. The one rule for
- * "who was this exchanged with" — the thread partition and the UI's
- * history checks must never disagree about it.
- */
-export function counterpartOf(message, meId) {
-  return (message.author_id === meId ? message.recipient_id : message.author_id) ?? null;
-}
-
-/**
  * Which of the four pairing states the app should show.
  *
  * "awaiting" and "ended" both look like "I named them, they don't name me
  * back" from the pairing row alone, so the hub says which one it is:
  * `proposal_pending` is true while the caller's own proposal is live (their
  * row still carries the session it was minted with) and false once the other
- * side tore the pairing down (that path clears the session). Message history
- * deliberately plays no part — it cannot tell a live re-proposal to a former
- * co-parent from the ended pairing it follows, and both misreadings are cruel:
- * one tells a parent to wait forever, the other tells them a pairing they just
- * proposed is already over.
+ * side tore the pairing down (that path clears the session). Nothing else can
+ * tell a live re-proposal to a former co-parent from the ended pairing it
+ * follows, and both misreadings are cruel: one tells a parent to wait forever,
+ * the other tells them a pairing they just proposed is already over.
  *
  * @param proposalPending the hub's `proposal_pending` for the caller
  * @returns {"unpaired"|"awaiting"|"ended"|"active"}
@@ -1461,46 +1441,32 @@ export function pairingState({ partnerId, reciprocal, proposalPending }) {
   return proposalPending ? "awaiting" : "ended";
 }
 
+// ── Messages link ───────────────────────────────────────────────────────────
+
 /**
- * Split a message log into the CURRENT pairing's record and earlier ones.
+ * Whose conversation the Messages tab should open, or null for the inbox.
  *
- * A parent keeps every message that names them, for as long as retention says
- * — including the record of a co-parent relationship that has since ended. Run
- * together in one thread those read as a single conversation with the person
- * you are paired with today, which is wrong and, for a record both parents may
- * rely on, misleading.
+ * The paired co-parent when there is one — but only while they are still an
+ * adult on the roster: the pairing row outlives the roster, and a partner who
+ * has left the space or is no longer an adult in it is not someone to open a
+ * thread with. With no pairing at all, the one adult it could only be
+ * (`soleCoParentCandidate`). A stale pairing never falls back to a guess.
  *
- * A message belongs to the current pairing exactly when it carries the current
- * session id: the hub stamps one onto every message it accepts, and there is
- * no current session unless the pairing is reciprocal. Everything else —
- * including the record of a pairing that just ended, while no new one is
- * live — groups by the other party, so one person's history stays contiguous
- * even across several of their own past sessions.
- *
- * (The app shipped with no installed base, so no message predates session
- * stamping; a null session id never occurs and simply files as "earlier".)
- *
- * @returns {{ current: object[], earlier: Array<{ counterpartId: string|null, messages: object[] }> }}
- *   `earlier` is grouped by the other party, most recent group first.
+ * @param paired the roster member the pairing names, if they are still on it
  */
-export function partitionMessagesBySession(messages, meId, sessionId) {
-  const current = [];
-  const groups = new Map();   // counterpartId -> { messages, latest }
-  for (const message of messages ?? []) {
-    if (sessionId && message.session_id === sessionId) { current.push(message); continue; }
-    const key = counterpartOf(message, meId);
-    let group = groups.get(key);
-    if (!group) { group = { messages: [], latest: "" }; groups.set(key, group); }
-    group.messages.push(message);
-    // Tracked while bucketing: the renderer re-partitions on every keystroke
-    // of the search box, so the comparator must not rescan each group.
-    if ((message.sent_at ?? "") > group.latest) group.latest = message.sent_at;
-  }
-  const earlier = [...groups.entries()]
-    .map(([counterpartId, group]) => ({ counterpartId, messages: group.messages, latest: group.latest }))
-    .sort((a, b) => b.latest.localeCompare(a.latest))
-    .map(({ counterpartId, messages: list }) => ({ counterpartId, messages: list }));
-  return { current, earlier };
+export function messagesCoParent({ canManage, partnerId, paired, pairedIsAdult, candidate }) {
+  if (!canManage) return null;
+  if (partnerId) return paired && pairedIsAdult ? paired : null;
+  return candidate ?? null;
+}
+
+/**
+ * The hub's Messages page, at the conversation with `memberId` when given.
+ * Empty when the hub published no origin: there is then nothing to link to.
+ */
+export function hubMessagesUrl(hubOrigin, memberId = null) {
+  if (!hubOrigin) return "";
+  return `${hubOrigin}/messages${memberId ? `?with=${encodeURIComponent(memberId)}` : ""}`;
 }
 
 // ── Custody journal ─────────────────────────────────────────────────────────

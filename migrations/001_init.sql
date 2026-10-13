@@ -95,18 +95,6 @@ CREATE TABLE IF NOT EXISTS app_co_parenting__swap_agreements (
   updated_at       TEXT NOT NULL
 );
 
--- Tamper-evident message log. couple_scoped read (the linked pair only) +
--- endpoint_writes_only: every insert goes through /api/append-record/messages,
--- which stamps author_id and sent_at server-side. No edits, no deletes — the
--- immutability is the feature (a trustworthy record for both parents).
-CREATE TABLE IF NOT EXISTS app_co_parenting__messages (
-  id           TEXT NOT NULL PRIMARY KEY,
-  author_id    TEXT NOT NULL,
-  recipient_id TEXT NOT NULL,
-  body         TEXT NOT NULL,
-  sent_at      TEXT NOT NULL
-);
-
 -- Per-exchange handoff notes (meds, school, mood, items to send along).
 -- endpoint_only + append_only_records: adults read, appends stamp created_by/created_at.
 -- read:"adult" scopes to ALL household adults, not just the linked co-parent pair
@@ -131,5 +119,3 @@ CREATE INDEX IF NOT EXISTS app_co_parenting__swap_requests_child_idx
   ON app_co_parenting__swap_requests (child_id);
 CREATE INDEX IF NOT EXISTS app_co_parenting__handoff_notes_child_idx
   ON app_co_parenting__handoff_notes (child_id, note_date);
-CREATE INDEX IF NOT EXISTS app_co_parenting__messages_sent_idx
-  ON app_co_parenting__messages (sent_at);

@@ -452,66 +452,6 @@
       ]
     },
     {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-72 hours'), ?)",
-      "params": [
-        "perf-msg-0",
-        "{{partner}}",
-        "{{me}}",
-        "Kid has a dentist appointment Thursday at 4.",
-        "perf-coparent-session"
-      ]
-    },
-    {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-63 hours'), ?)",
-      "params": [
-        "perf-msg-1",
-        "{{me}}",
-        "{{partner}}",
-        "Thanks, I will take them and send the paperwork.",
-        "perf-coparent-session"
-      ]
-    },
-    {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-54 hours'), ?)",
-      "params": [
-        "perf-msg-2",
-        "{{partner}}",
-        "{{me}}",
-        "Can you pack the swim bag for Saturday?",
-        "perf-coparent-session"
-      ]
-    },
-    {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-45 hours'), ?)",
-      "params": [
-        "perf-msg-3",
-        "{{me}}",
-        "{{partner}}",
-        "Done. Goggles are in the side pocket.",
-        "perf-coparent-session"
-      ]
-    },
-    {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-36 hours'), ?)",
-      "params": [
-        "perf-msg-4",
-        "{{partner}}",
-        "{{me}}",
-        "School photos are next Tuesday.",
-        "perf-coparent-session"
-      ]
-    },
-    {
-      "sql": "INSERT INTO app_co_parenting__messages (id, author_id, recipient_id, body, sent_at, session_id) VALUES (?, ?, ?, ?, datetime('now','-27 hours'), ?)",
-      "params": [
-        "perf-msg-5",
-        "{{me}}",
-        "{{partner}}",
-        "Got it, I will iron the shirt.",
-        "perf-coparent-session"
-      ]
-    },
-    {
       "sql": "INSERT INTO app_co_parenting__handoff_notes (id, child_id, note_date, category, body, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now','-1 days'))",
       "params": [
         "perf-hn-0",

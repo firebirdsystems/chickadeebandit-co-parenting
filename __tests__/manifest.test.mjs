@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { describe, it, expect } from "vitest";
@@ -107,7 +107,6 @@ describe("manifest.json", () => {
   it("imports every Phase 4 pairing helper used by the browser entrypoint", () => {
     const logicImport = entrypoint.match(/import\s*\{([\s\S]*?)\}\s*from\s*["']\.\/logic\.js["']/)?.[1] ?? "";
     expect(logicImport).toMatch(/\bpairingState\b/);
-    expect(logicImport).toMatch(/\bpartitionMessagesBySession\b/);
   });
 });
 
@@ -143,7 +142,7 @@ describe("manifest ↔ app agreement", async () => {
   // day from any view filtered on a timestamp.
   it("includes the whole end day in every report filtered on a timestamp", () => {
     const stamped = manifest.reports.views.filter((v) => /_at >= :range_start/.test(v.source.query)).map((v) => v.id);
-    expect(stamped.sort()).toEqual(["holiday_schedule", "message_log", "standing_schedule", "swap_requests"]);
+    expect(stamped.sort()).toEqual(["holiday_schedule", "standing_schedule", "swap_requests"]);
     for (const id of stamped) {
       const query = manifest.reports.views.find((v) => v.id === id).source.query;
       expect(query, id).toMatch(/substr\([\w.]+_at, 1, 10\) <= substr\(:range_end, 1, 10\)/);
@@ -151,14 +150,41 @@ describe("manifest ↔ app agreement", async () => {
     }
   });
 
-  // The receipt is stamped by the hub's paired-message endpoint (recipient-only,
-  // server time, never cleared), so the record can show when the other parent
-  // first saw each message — the fact a reader of the log asks about first.
-  it("records when the recipient first viewed each message", () => {
-    const view = manifest.reports.views.find((v) => v.id === "message_log");
-    expect(view.source.query).toContain("read_at AS first_viewed");
-    expect(view.columns.find((c) => c.key === "first_viewed")).toEqual({ key: "first_viewed", label: "First viewed", format: "datetime" });
-    expect(view.description).toMatch(/set by the hub/);
+  // The parents' conversation is the space's own Messages. The app keeps no
+  // copy and no second inbox: it asks the hub to print the conversations in
+  // the full record, and links to the thread.
+  it("leaves messages to the hub and asks for them in the full record", () => {
+    expect(manifest.reports.conversations).toBe(true);
+    expect(manifest.paired_messages).toBeUndefined();
+    expect(manifest.reports.views.map((v) => v.id)).not.toContain("message_log");
+    expect(JSON.stringify(manifest)).not.toMatch(/__messages\b/);
+  });
+
+  // No household ran the old schema, so the table is gone from the migrations
+  // themselves instead of surviving as a sealed leftover.
+  it("has no messages table anywhere in its schema", () => {
+    expect(manifest.row_policies.messages).toBeUndefined();
+    expect(manifest.member_references.messages).toBeUndefined();
+    const dir = join(__dirname, "../migrations");
+    for (const file of readdirSync(dir)) {
+      expect(readFileSync(join(dir, file), "utf-8"), file).not.toMatch(/co_parenting__messages/);
+    }
+  });
+
+  it("has no message write or read path of its own in the entrypoint", () => {
+    expect(entrypoint).not.toMatch(/api\/paired-message/);
+    expect(entrypoint).not.toMatch(/co_parenting__messages|\$\{P\}messages/);
+  });
+
+  // The pairing still names the swap counterparty, so it survives the move.
+  it("keeps the pairing that swaps and notifications rely on", () => {
+    expect(manifest.partner_link.table).toBe("partner_config");
+    expect(manifest.row_policies.partner_config.kind).toBe("owner_only");
+  });
+
+  it("builds the Messages link from the tested rules, and marks it as leaving the app", () => {
+    expect(entrypoint).toContain("const href = hubMessagesUrl(HUB_ORIGIN, coParent?.id);");
+    expect(entrypoint).toMatch(/data-testid="open-messages"[^>]*target="_top"/);
   });
 
   // A holiday schedule moves custody days, so it is held to what the standing

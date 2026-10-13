@@ -2,7 +2,7 @@
   "id": "co-parenting",
   "name": "Co-Parenting",
   "version": "1.7.0",
-  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, a message log that cannot be edited or deleted after sending, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -106,22 +106,6 @@
       "kind": "endpoint_only",
       "read": "adult"
     },
-    "messages": {
-      "kind": "couple_scoped",
-      "self_column": "author_id",
-      "participant_columns": [
-        "author_id",
-        "recipient_id"
-      ],
-      "partner_table": "partner_config",
-      "partner_member_column": "member_id",
-      "partner_id_column": "partner_id",
-      "session_column": "session_id",
-      "partner_session_id_column": "session_id",
-      "read_participant_only": true,
-      "require_reciprocal": true,
-      "endpoint_writes_only": true
-    },
     "handoff_notes": {
       "kind": "endpoint_only",
       "read": "adult"
@@ -157,29 +141,6 @@
       "kind": "endpoint_only",
       "read": "adult",
       "audit_writes": true
-    }
-  },
-  "paired_messages": {
-    "table": "messages",
-    "id_column": "id",
-    "sender_column": "author_id",
-    "recipient_column": "recipient_id",
-    "content_column": "body",
-    "sent_at_column": "sent_at",
-    "read_at_column": "read_at",
-    "partner_table": "partner_config",
-    "partner_member_column": "member_id",
-    "partner_id_column": "partner_id",
-    "session_id_column": "session_id",
-    "partner_session_id_column": "session_id",
-    "require_reciprocal": true,
-    "max_length": 5000,
-    "notify": {
-      "title": "New co-parenting message",
-      "body": "Open Co-Parenting to read it.",
-      "url_params": {
-        "view": "messages"
-      }
     }
   },
   "append_only_records": {
@@ -391,16 +352,6 @@
       },
       {
         "column": "child_id",
-        "on_removed": "keep"
-      }
-    ],
-    "messages": [
-      {
-        "column": "author_id",
-        "on_removed": "keep"
-      },
-      {
-        "column": "recipient_id",
         "on_removed": "keep"
       }
     ],
@@ -900,41 +851,6 @@
         ]
       },
       {
-        "id": "message_log",
-        "title": "Message log",
-        "description": "Every message between the co-parents, oldest first. Append-only — messages cannot be edited or deleted. First viewed is set by the hub when the recipient first opens the Messages thread with that message unread; the sender never writes it, it is never cleared, and opening this record does not set it.",
-        "source": {
-          "kind": "sql",
-          "query": "SELECT sent_at AS sent_at, read_at AS first_viewed, author_id AS author, recipient_id AS recipient, body AS body FROM app_co_parenting__messages WHERE sent_at >= :range_start AND substr(sent_at, 1, 10) <= substr(:range_end, 1, 10) ORDER BY sent_at"
-        },
-        "columns": [
-          {
-            "key": "sent_at",
-            "label": "Sent",
-            "format": "datetime"
-          },
-          {
-            "key": "first_viewed",
-            "label": "First viewed",
-            "format": "datetime"
-          },
-          {
-            "key": "author",
-            "label": "From",
-            "format": "member"
-          },
-          {
-            "key": "recipient",
-            "label": "To",
-            "format": "member"
-          },
-          {
-            "key": "body",
-            "label": "Message"
-          }
-        ]
-      },
-      {
         "id": "schedule_changes",
         "title": "Schedule changes",
         "description": "Every countersigned exception to the standing rotation, with the terms exactly as frozen when both parents agreed.",
@@ -1295,7 +1211,8 @@
           }
         ]
       }
-    ]
+    ],
+    "conversations": true
   },
   "nav": {
     "label": "Co-Parenting"
