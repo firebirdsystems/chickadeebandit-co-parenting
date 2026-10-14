@@ -86,12 +86,7 @@
     },
     "custody_days": {
       "kind": "endpoint_only",
-      "read": "everyone",
-      "retain_days": {
-        "default": 400,
-        "timestamp_column": "day",
-        "tier": "evidentiary"
-      }
+      "read": "everyone"
     },
     "swap_requests": {
       "kind": "party_scoped",
@@ -125,12 +120,7 @@
     "custody_log": {
       "kind": "endpoint_only",
       "read": "adult",
-      "audit_writes": true,
-      "retain_days": {
-        "default": 400,
-        "timestamp_column": "day",
-        "tier": "evidentiary"
-      }
+      "audit_writes": true
     },
     "holiday_amendments": {
       "kind": "endpoint_only",
@@ -141,6 +131,18 @@
       "kind": "endpoint_only",
       "read": "adult",
       "audit_writes": true
+    }
+  },
+  "retention": {
+    "custody_days": {
+      "default": 400,
+      "timestamp_column": "day",
+      "tier": "evidentiary"
+    },
+    "custody_log": {
+      "default": 400,
+      "timestamp_column": "day",
+      "tier": "evidentiary"
     }
   },
   "append_only_records": {
@@ -1222,9 +1224,6 @@
     "size": "small"
   },
   "icon": "🧭",
-  "resource_limits": {
-    "max_db_bytes": 52428800
-  },
   "preload": {
     "swap_requests": {
       "sql": "SELECT * FROM app_co_parenting__swap_requests ORDER BY created_at DESC"
