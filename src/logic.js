@@ -1873,3 +1873,83 @@ export const HOLIDAY_SNAPSHOT_COLUMNS = [
 export function holidaySnapshot(version) {
   return Object.fromEntries(HOLIDAY_SNAPSHOT_COLUMNS.map((column) => [column, version?.[column] ?? null]));
 }
+
+// ── What a failed write tells the user ──────────────────────────────────────
+// "Try again" only when trying again can work. The hub's own text never
+// reaches the screen: the line is chosen from the status (and `code`) the
+// request helpers put on the Error, and, for a write that changed nothing or
+// a refused agreement, from what a re-read found.
+
+/** The line for a failed write. `found` is the caller's re-read for a write
+ *  that changed nothing: false = the row is gone, true = it is still there
+ *  (the hub narrowed a plain `WHERE id = ?` write away from this member). */
+export function failureLine(e, { action, thing, found } = {}) {
+  if (e?.forUser) return e.message;
+  if (e?.code === "UNIQUE_CONSTRAINT" || /UNIQUE constraint failed/i.test(String(e?.message ?? ""))) return `That ${thing} already exists.`;
+  if (e?.status === 403) return `You don’t have permission to ${action}.`;
+  if (e?.status === 507) return "The household’s storage is full — free up space first.";
+  if (e?.status === 429) return "Too many tries — wait a minute and try again.";
+  if (found === false || (found === undefined && e?.status === 404)) return `This ${thing} has been removed.`;
+  if (found === true) return `You don’t have permission to ${action}.`;
+  if (e?.status === 409) return `This ${thing} was changed by someone else — check it first.`;
+  return `Couldn’t ${action} — try again.`;
+}
+
+/**
+ * What a re-read says about an agreement row after a refusal, for
+ * `agreementFailureLine`. `readOk` false (the re-read failed) knows nothing.
+ * `open` is the state the action was made against: a pending proposal for
+ * sign/decline/withdraw (a "draft" status is one whose agreement row the hub
+ * has not created yet, which is pending too), the agreed version for
+ * countersigning one in force or proposing its end.
+ */
+export function agreementRowState(row, { readOk, open = "pending" } = {}) {
+  if (!readOk) return undefined;
+  if (!row) return "gone";
+  const status = row.status === "draft" ? "pending" : row.status;
+  if (status === open) return "open";
+  return open === "pending" ? "answered" : "replaced";
+}
+
+/**
+ * The line for a refused agreements-protocol call (propose, sign, decline,
+ * withdraw, countersign). The endpoint names its cases by status, not code:
+ * 403 not a party, 404 no such row, 409 the state moved (or, with
+ * Retry-After, another change to the schedule is being applied), 400 a row
+ * no longer pending as well as a malformed request. `state` comes from
+ * `agreementRowState` and is trusted only for a 4xx — with no answer or a
+ * 5xx, a row that moved may have moved by this parent's own request.
+ */
+export function agreementFailureLine(e, { action, thing, state } = {}) {
+  if (e?.forUser) return e.message;
+  const status = Number(e?.status) || 0;
+  if (status === 409 && e?.retryAfter) return "Another change to this schedule is being applied — try again in a moment.";
+  if (status === 403) return `You don’t have permission to ${action}.`;
+  if (status === 507) return "The household’s storage is full — free up space first.";
+  if (status === 429) return "Too many tries — wait a minute and try again.";
+  const refused = status >= 400 && status < 500;
+  if ((refused && state === "gone") || (state === undefined && status === 404)) return `This ${thing} has been removed.`;
+  if (refused && state === "answered") return `This ${thing} was already answered.`;
+  if (refused && state === "replaced") return `This ${thing} is no longer the one in force — check the current one.`;
+  // Said of no one: the 409 may be the schedule in force moving, not the
+  // proposal, and between two parents a line naming who changed what is a claim.
+  if (status === 409) return "Something changed while you had this open — check it first.";
+  return `Couldn’t ${action} — try again.`;
+}
+
+/**
+ * Whether a failed write may have been stored and only its answer lost
+ * ("retry after a lost response"): no status (the request threw), a 400 (the
+ * hub's answer for a write that timed out), or a 5xx other than 507. The
+ * caller re-reads by the id it kept before saying anything.
+ */
+export function outcomeUnknown(e) {
+  const status = Number(e?.status) || 0;
+  return status === 0 || status === 400 || (status >= 500 && status !== 507);
+}
+
+/** Whether a stored row differs from what the form holds now, over the form's
+ *  own columns only, compared as text with a missing value as empty. */
+export function storedDiffers(row, fields) {
+  return Object.keys(fields).some((k) => String(row?.[k] ?? "") !== String(fields[k] ?? ""));
+}

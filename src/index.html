@@ -145,6 +145,7 @@
       SWAP_HORIZON_DAYS, swapIsStalled, swapStallReason, swapPartyIssue,
       versionSignatures, unilateralStance, scheduleSnapshot, childrenOpenForNewSchedule, timeZoneChoices, timeZoneDefaultSource,
       fmtHandoffDay as fmtHandoffDayFrom, fmtExchangeTime,
+      failureLine, agreementRowState, agreementFailureLine, outcomeUnknown, storedDiffers,
     } from "./logic.js";
 
     // ── Runtime globals ──────────────────────────────────────────────────────
@@ -162,7 +163,11 @@
         body: JSON.stringify({ sql, params }),
       });
       const json = await res.json().catch(() => null);
-      if (!res.ok || !json || typeof json !== "object" || json.error) throw new Error(json?.error || "Couldn’t reach the hub. Try again.");
+      if (!res.ok || !json || typeof json !== "object" || json.error) {
+        // `status` and `code` are what failureLine reads; the text is for the console.
+        throw Object.assign(new Error(json?.error || "Couldn’t reach the hub. Try again."),
+          { status: res.status, ...(json?.code ? { code: json.code } : {}) });
+      }
       return json;
     }
 
@@ -529,7 +534,16 @@
         }),
       });
       const json = await res.json().catch(() => null);
-      if (!res.ok || !json || typeof json !== "object" || json.error) throw new Error(json?.error || fallbackError);
+      if (!res.ok || !json || typeof json !== "object" || json.error) {
+        // The line shown is chosen from `status` (and `code`), never from the
+        // hub's text. `retryAfter` marks the agreements endpoint's "another
+        // change to this schedule is being applied" 409.
+        throw Object.assign(new Error(json?.error || fallbackError), {
+          status: res.status,
+          ...(json?.code ? { code: json.code } : {}),
+          ...(res.headers?.get?.("Retry-After") ? { retryAfter: true } : {}),
+        });
+      }
       return json;
     }
 
@@ -537,6 +551,25 @@
       return requestJson(`${APPEND_RECORD}/${encodeURIComponent(name)}`, {
         body: data, fallbackError: "Could not save",
       });
+    }
+
+    /** After a refused agreement call and a loadData(): what became of row `id`
+     *  in `list`. Unknown when the re-read failed — loadData keeps going on a
+     *  failed read with an empty list, which must not read as "removed". */
+    function reReadState(list, id, open) {
+      return agreementRowState(list.find(r => r.id === id), {
+        readOk: !versionsReadFailed && !adultReadsFailed, open,
+      });
+    }
+
+    /** "Retry after a lost response" for a countersign or decline: when the
+     *  outcome is unknown and the re-read (a loadData() already made) shows
+     *  this parent's own answer recorded, the row; otherwise null. Only then
+     *  does the caller run its success path, once. */
+    function landedUnheard(e, list, id, landed) {
+      if (!outcomeUnknown(e) || versionsReadFailed || adultReadsFailed) return null;
+      const row = list.find(r => r.id === id);
+      return row && landed(row) ? row : null;
     }
 
     /**
@@ -564,7 +597,8 @@
         render();
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = "End pairing"; }
-        hubAlert(e.message);
+        console.error("end pairing failed", e);
+        hubAlert(failureLine(e, { action: "end the pairing", thing: "pairing" }));
       }
     }
 
@@ -1431,8 +1465,18 @@
         }
       } catch (e) {
         btn.disabled = false; btn.textContent = "Propose and sign";
-        hubAlert(e.message);
+        console.error("propose holiday schedule failed", e);
+        hubAlert(agreementFailureLine(e, { action: "send this holiday schedule", thing: "holiday schedule" }));
       }
+    }
+
+    function notifyHolidayAgreed(holiday) {
+      const ending = !parseHolidayRules(holiday.rules).length;
+      notifySchedule(ending ? "Holiday schedule ended" : "Holiday schedule agreed",
+        ending
+          ? `${me?.name} countersigned ending ${memberName(holiday.child_id)}'s holiday schedule. Every day follows the regular rotation again.`
+          : `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It's now in force.`,
+        { view: "holidays" });
     }
 
     async function onSignHoliday(id, btn) {
@@ -1453,17 +1497,19 @@
         }
         // The custody days are rewritten in the same transaction as the lock.
         await loadData(); render();
-        if (result.locked) {
-          const ending = !parseHolidayRules(holiday.rules).length;
-          notifySchedule(ending ? "Holiday schedule ended" : "Holiday schedule agreed",
-            ending
-              ? `${me?.name} countersigned ending ${memberName(holiday.child_id)}'s holiday schedule. Every day follows the regular rotation again.`
-              : `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It's now in force.`,
-            { view: "holidays" });
-        }
+        if (result.locked) notifyHolidayAgreed(holiday);
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = "Countersign"; }
-        hubAlert(e.message);
+        console.error("countersign holiday schedule failed", e);
+        // A refusal usually means the proposal moved on; show where it is now.
+        await loadData().catch(() => {});
+        render();
+        // The answer was lost but the countersignature locked it: done.
+        if (landedUnheard(e, holidayVersions, id, v => v.status === "agreed")) { notifyHolidayAgreed(holiday); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: "countersign this holiday schedule", thing: "proposal",
+          state: reReadState(holidayVersions, id),
+        }));
       }
     }
 
@@ -1481,18 +1527,23 @@
         confirmLabel: "Countersign",
       });
       if (!ok) return;
+      const notifyCountersigned = () => notifySchedule("Holiday schedule countersigned",
+        `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It was already in force and has not changed.`,
+        { view: "holidays" });
       try {
         const result = await agreeHoliday(id, true, undefined, holidaySnapshot(holiday));
         await loadData(); render();
-        if (result.late_signature) {
-          notifySchedule("Holiday schedule countersigned",
-            `${me?.name} countersigned ${memberName(holiday.child_id)}'s holiday schedule. It was already in force and has not changed.`,
-            { view: "holidays" });
-        }
+        if (result.late_signature) notifyCountersigned();
       } catch (e) {
+        console.error("countersign holiday schedule in force failed", e);
         await loadData().catch(() => {});
         render();
-        hubAlert(e.message);
+        // Lost answer, and the late signature is now on the row: it landed.
+        if (landedUnheard(e, holidayVersions, id, v => v.status === "agreed" && !!v.countersigned_at)) { notifyCountersigned(); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: "countersign this holiday schedule", thing: "holiday schedule",
+          state: reReadState(holidayVersions, id, "agreed"),
+        }));
       }
     }
 
@@ -1507,18 +1558,27 @@
       });
       if (!ok) return;
       if (btn) { btn.disabled = true; btn.textContent = mine ? "Withdrawing…" : "Declining…"; }
+      const notifyResolved = (withdrew) => notifySchedule(withdrew ? "Holiday schedule withdrawn" : "Holiday schedule declined",
+        `${me?.name} ${withdrew ? "withdrew their proposed" : "declined the proposed"} holiday schedule for ${memberName(holiday.child_id)}.`,
+        { view: "holidays" });
       try {
         // `resolution: true`: the hub resolves it the way OUR side resolves and
         // says which word it used (see onDeclineAmendment).
         const result = await agreeHoliday(id, false, true);
-        const withdrew = result.status === "withdrawn";
         await loadData(); render();
-        notifySchedule(withdrew ? "Holiday schedule withdrawn" : "Holiday schedule declined",
-          `${me?.name} ${withdrew ? "withdrew their proposed" : "declined the proposed"} holiday schedule for ${memberName(holiday.child_id)}.`,
-          { view: "holidays" });
+        notifyResolved(result.status === "withdrawn");
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = mine ? "Withdraw" : "Decline"; }
-        hubAlert(e.message);
+        console.error("decline holiday schedule failed", e);
+        await loadData().catch(() => {});
+        render();
+        // Lost answer, and the row carries this side's own word: it landed.
+        const landed = landedUnheard(e, holidayVersions, id, v => v.status === (mine ? "withdrawn" : "declined"));
+        if (landed) { notifyResolved(landed.status === "withdrawn"); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: mine ? "withdraw this proposal" : "decline this proposal", thing: "proposal",
+          state: reReadState(holidayVersions, id),
+        }));
       }
     }
 
@@ -1860,7 +1920,9 @@
         return true;
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
-        hubAlert(e.message);
+        console.error("save journal entry failed", e);
+        // An answer names the entry it answers: a 404 or 409 is about THAT entry.
+        hubAlert(failureLine(e, { action: "save the journal entry", thing: "journal entry" }));
         return false;
       }
     }
@@ -2419,7 +2481,8 @@
         render();
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = restoreLabel; }
-        hubAlert(e.message);
+        console.error("save co-parent failed", e);
+        hubAlert(failureLine(e, { action: "save your co-parent", thing: "pairing" }));
       }
     }
 
@@ -2531,9 +2594,14 @@
         btn.disabled = false; btn.textContent = "Send for countersignature";
         // The refusal may be about a schedule that moved under this form (the
         // other parent's change was agreed meanwhile), so show what is true now.
+        console.error("propose schedule failed", e);
         await loadData().catch(() => {});
         render();
-        hubAlert(e.message);
+        hubAlert(agreementFailureLine(e, {
+          action: "send this schedule", thing: "custody schedule",
+          // Proposed against a version that is no longer in force: say so.
+          state: existing ? reReadState(versions, existing.id, "agreed") : undefined,
+        }));
       }
     }
 
@@ -2620,28 +2688,57 @@
       const btn = modalEl.querySelector("#save-draft");
       btn.disabled = true; btn.textContent = "Saving…";
       const now = new Date().toISOString();
+      // A new draft's id is minted once per form and kept on its button, so a
+      // second press after a lost answer looks for the first one's row instead
+      // of inserting another (which the one-per-child cap would refuse).
+      const newId = draft?.id ? null : (btn.dataset.rowId ||= crypto.randomUUID());
+      // The draft's own columns, as the form holds them now.
+      const fields = {
+        parent_a_id: form.parent_a_id, parent_b_id: form.parent_b_id, pattern: form.pattern,
+        cycle: form.cycle, cycle_length: form.cycle_length, anchor_date: form.anchor_date,
+        exchange_time: form.exchange_time, timezone: form.timezone, rationale: form.rationale,
+        base_version_id: form.base_version_id,
+      };
       try {
         if (!DEMO) {
           // UPDATE, never a second INSERT: max_per_member caps this table at one
           // row per parent per child, so an insert here would be refused by the
           // policy rather than quietly making a duplicate.
-          if (draft?.id) {
+          let updateId = draft?.id ?? null;
+          if (!updateId) {
+            try {
+              // author_id is forced by the hub on insert (owner_only). Passing it
+              // is how the SQL reads honestly, not how the value is decided.
+              await db(`INSERT INTO ${P}schedule_drafts (id, author_id, child_id, parent_a_id, parent_b_id,
+                          pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, rationale,
+                          base_version_id, created_at, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                [newId, me?.id, form.child_id, form.parent_a_id, form.parent_b_id,
+                 form.pattern, form.cycle, form.cycle_length, form.anchor_date, form.exchange_time,
+                 form.timezone, form.rationale, form.base_version_id, now, now]);
+            } catch (e) {
+              // Unknown outcome, or the cap's 403 (an earlier press's row
+              // already fills it): read back by the kept id. Found means an
+              // earlier press landed.
+              if (!outcomeUnknown(e) && e?.status !== 403) throw e;
+              const stored = (await db(`SELECT * FROM ${P}schedule_drafts WHERE id = ?`, [newId]).catch(() => null))?.rows?.[0];
+              if (!stored) throw e;
+              // An earlier press stored a draft for another child (the select
+              // changed since): that one stands, and this child's gets its own id.
+              if (stored.child_id !== form.child_id) { btn.dataset.rowId = crypto.randomUUID(); throw e; }
+              console.error("draft was saved by an earlier press; its answer was lost", e);
+              // Edited since that press: what the form holds now goes through
+              // the ordinary update.
+              if (storedDiffers(stored, fields)) updateId = newId;
+            }
+          }
+          if (updateId) {
             await db(`UPDATE ${P}schedule_drafts SET parent_a_id=?, parent_b_id=?, pattern=?, cycle=?,
                         cycle_length=?, anchor_date=?, exchange_time=?, timezone=?, rationale=?,
                         base_version_id=?, updated_at=? WHERE id=?`,
               [form.parent_a_id, form.parent_b_id, form.pattern, form.cycle, form.cycle_length,
                form.anchor_date, form.exchange_time, form.timezone, form.rationale,
-               form.base_version_id, now, draft.id]);
-          } else {
-            // author_id is forced by the hub on insert (owner_only). Passing it
-            // is how the SQL reads honestly, not how the value is decided.
-            await db(`INSERT INTO ${P}schedule_drafts (id, author_id, child_id, parent_a_id, parent_b_id,
-                        pattern, cycle, cycle_length, anchor_date, exchange_time, timezone, rationale,
-                        base_version_id, created_at, updated_at)
-                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-              [crypto.randomUUID(), me?.id, form.child_id, form.parent_a_id, form.parent_b_id,
-               form.pattern, form.cycle, form.cycle_length, form.anchor_date, form.exchange_time,
-               form.timezone, form.rationale, form.base_version_id, now, now]);
+               form.base_version_id, now, updateId]);
           }
         }
         closeModal();
@@ -2651,7 +2748,8 @@
         render();
       } catch (e) {
         btn.disabled = false; btn.textContent = "Save as draft";
-        hubAlert(e.message);
+        console.error("save draft failed", e);
+        hubAlert(failureLine(e, { action: "save the draft", thing: "draft" }));
       }
     }
 
@@ -2697,7 +2795,10 @@
             ? `${me?.name} set the standing schedule for ${memberName(terms.child_id)}.`
             : `${me?.name} proposed a schedule for ${memberName(terms.child_id)}. It takes effect when you countersign it.`,
           { view: "setup" });
-      } catch (e) { hubAlert(e.message); }
+      } catch (e) {
+        console.error("send draft failed", e);
+        hubAlert(agreementFailureLine(e, { action: "send the draft", thing: "custody schedule" }));
+      }
     }
 
     /** Delete a draft. Nothing else ever saw it, so there is nothing to retain
@@ -2715,7 +2816,10 @@
         if (!DEMO) await db(`DELETE FROM ${P}schedule_drafts WHERE id = ?`, [id]);
         drafts = drafts.filter(d => d.id !== id);
         if (!silent) { await loadData(); render(); }
-      } catch (e) { if (!silent) hubAlert(e.message); }
+      } catch (e) {
+        console.error("discard draft failed", e);
+        if (!silent) hubAlert(failureLine(e, { action: "discard the draft", thing: "draft" }));
+      }
     }
 
     /**
@@ -2764,7 +2868,15 @@
             : `${me?.name} proposed ending ${memberName(current.child_id)}'s schedule. It stays in force until you countersign.`,
           { view: "setup" });
         announceProposal(result);
-      } catch (e) { hubAlert(e.message); }
+      } catch (e) {
+        console.error("propose ending schedule failed", e);
+        await loadData().catch(() => {});
+        render();
+        hubAlert(agreementFailureLine(e, {
+          action: "propose ending this schedule", thing: "custody schedule",
+          state: reReadState(versions, versionId, "agreed"),
+        }));
+      }
     }
 
     /** Countersign, decline, or withdraw a standing-schedule amendment. */
@@ -2792,6 +2904,9 @@
     async function onSignAmendment(id) {
       const amendment = versions.find(v => v.id === id);
       if (!amendment) return;
+      const notifyAgreed = () => notifySchedule("Custody schedule agreed",
+        `${me?.name} countersigned the change to ${memberName(amendment.child_id)}'s schedule. It's now in force.`,
+        { view: "schedule" });
       try {
         const result = await agreeSchedule(id, true);
         // `already_agreed` with `locked` is a retry that finished the job (see
@@ -2807,12 +2922,18 @@
         // successful countersignature means the calendar is already correct.
         await loadData();
         render();
-        if (result.locked) {
-          notifySchedule("Custody schedule agreed",
-            `${me?.name} countersigned the change to ${memberName(amendment.child_id)}'s schedule. It's now in force.`,
-            { view: "schedule" });
-        }
-      } catch (e) { hubAlert(e.message); }
+        if (result.locked) notifyAgreed();
+      } catch (e) {
+        console.error("countersign schedule change failed", e);
+        await loadData().catch(() => {});
+        render();
+        // The answer was lost but the countersignature locked it: done.
+        if (landedUnheard(e, versions, id, v => v.status === "agreed")) { notifyAgreed(); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: "countersign this change", thing: "proposal",
+          state: reReadState(versions, id),
+        }));
+      }
     }
 
     /**
@@ -2836,21 +2957,26 @@
         confirmLabel: "Countersign",
       });
       if (!ok) return;
+      const notifyCountersigned = () => notifySchedule("Custody schedule countersigned",
+        `${me?.name} countersigned ${memberName(version.child_id)}'s schedule. It was already in force and has not changed.`,
+        { view: "setup" });
       try {
         const result = await agreeSchedule(id, true, undefined, scheduleSnapshot(version));
         await loadData();
         render();
-        if (result.late_signature) {
-          notifySchedule("Custody schedule countersigned",
-            `${me?.name} countersigned ${memberName(version.child_id)}'s schedule. It was already in force and has not changed.`,
-            { view: "setup" });
-        }
+        if (result.late_signature) notifyCountersigned();
       } catch (e) {
         // The usual cause is that it stopped being the version in force while
         // this screen was open, so show what is true now.
+        console.error("countersign schedule in force failed", e);
         await loadData().catch(() => {});
         render();
-        hubAlert(e.message);
+        // Lost answer, and the late signature is now on the row: it landed.
+        if (landedUnheard(e, versions, id, v => v.status === "agreed" && !!v.countersigned_at)) { notifyCountersigned(); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: "countersign this schedule", thing: "custody schedule",
+          state: reReadState(versions, id, "agreed"),
+        }));
       }
     }
 
@@ -2864,6 +2990,12 @@
         destructive: true,
       });
       if (!ok) return;
+      const notifyResolved = (withdrew) => notifySchedule(
+        withdrew ? "Schedule change withdrawn" : "Schedule change declined",
+        withdrew
+          ? `${me?.name} withdrew their proposed change to ${memberName(amendment.child_id)}'s schedule.`
+          : `${me?.name} declined the proposed change to ${memberName(amendment.child_id)}'s schedule.`,
+        { view: "setup" });
       try {
         // `resolution: true` asks the hub to resolve this the way OUR side
         // resolves, rather than naming "withdrawn" or "declined" ourselves. The
@@ -2873,16 +3005,21 @@
         // hub returns the value it used, which is also the honest source for
         // the wording below.
         const result = await agreeSchedule(id, false, true);
-        const withdrew = result.status === "withdrawn";
         await loadData();
         render();
-        notifySchedule(
-          withdrew ? "Schedule change withdrawn" : "Schedule change declined",
-          withdrew
-            ? `${me?.name} withdrew their proposed change to ${memberName(amendment.child_id)}'s schedule.`
-            : `${me?.name} declined the proposed change to ${memberName(amendment.child_id)}'s schedule.`,
-          { view: "setup" });
-      } catch (e) { hubAlert(e.message); }
+        notifyResolved(result.status === "withdrawn");
+      } catch (e) {
+        console.error("decline schedule change failed", e);
+        await loadData().catch(() => {});
+        render();
+        // Lost answer, and the row carries this side's own word: it landed.
+        const landed = landedUnheard(e, versions, id, v => v.status === (mine ? "withdrawn" : "declined"));
+        if (landed) { notifyResolved(landed.status === "withdrawn"); return; }
+        hubAlert(agreementFailureLine(e, {
+          action: mine ? "withdraw this proposal" : "decline this proposal", thing: "proposal",
+          state: reReadState(versions, id),
+        }));
+      }
     }
 
     // One id per REQUEST, not per click. The insert and the requester's
@@ -2930,7 +3067,8 @@
         notifyPartner("Swap request", `${me?.name} proposed a schedule swap for ${memberName(child_id)}.`, { view: "swaps" });
       } catch (e) {
         btn.disabled = false; btn.textContent = "Send request";
-        hubAlert(e.message);
+        console.error("send swap request failed", e);
+        hubAlert(agreementFailureLine(e, { action: "send the swap request", thing: "swap request" }));
       }
     }
 
@@ -2982,8 +3120,24 @@
         // so the row may now carry both signatures and still be pending. Re-read
         // it, or the card goes on offering "Agree" for a state that is gone —
         // and the next reload shows a swap with no buttons at all.
-        if (!DEMO) { await loadData(); render(); }
-        hubAlert(e.message);
+        console.error("agree to swap failed", e);
+        if (!DEMO) { await loadData().catch(() => {}); render(); }
+        // The answer was lost but this parent's consent is on the row: locked
+        // means the swap is done (the re-read drew it), still pending with only
+        // this parent's flag means it waits on the other parent, as an answered
+        // unlocked consent does. Pending with BOTH flags is the hub's refused
+        // lock (its 500 keeps the consent), which is a failure to report.
+        const mine = v => (me?.id === v.requester_id ? v.requester_agreed : me?.id === v.responder_id ? v.responder_agreed : 0);
+        const landed = DEMO ? null : landedUnheard(e, swaps, id, v => v.status === "locked"
+          || (v.status === "pending" && !!mine(v) && !(v.requester_agreed && v.responder_agreed)));
+        if (landed) {
+          if (landed.status === "locked") notifyPartner("Swap confirmed", `${me?.name} agreed to the swap for ${memberName(landed.child_id)}.`, { view: "swaps" });
+          return;
+        }
+        hubAlert(agreementFailureLine(e, {
+          action: "agree to the swap", thing: "swap request",
+          state: DEMO ? undefined : reReadState(swaps, id),
+        }));
       }
     }
 
@@ -3003,7 +3157,21 @@
         s.status = "declined";
         render();
         notifyPartner("Swap declined", `${me?.name} declined the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
-      } catch (e) { hubAlert(e.message); }
+      } catch (e) {
+        console.error("decline swap failed", e);
+        if (!DEMO) { await loadData().catch(() => {}); render(); }
+        // The answer was lost but the decline is on the row: finish as the
+        // success path does (mirror, then tell the other parent).
+        if (!DEMO && landedUnheard(e, swaps, id, v => v.status === "declined")) {
+          await db(`UPDATE ${P}swap_requests SET status='declined', updated_at=? WHERE id=?`, [new Date().toISOString(), id]).catch(() => {});
+          notifyPartner("Swap declined", `${me?.name} declined the swap for ${memberName(s.child_id)}.`, { view: "swaps" });
+          return;
+        }
+        hubAlert(agreementFailureLine(e, {
+          action: "decline the swap", thing: "swap request",
+          state: DEMO ? undefined : reReadState(swaps, id),
+        }));
+      }
     }
 
     async function onCancel(id) {
@@ -3016,7 +3184,19 @@
         }
         s.status = "cancelled";
         render();
-      } catch (e) { hubAlert(e.message); }
+      } catch (e) {
+        console.error("cancel swap failed", e);
+        if (!DEMO) { await loadData().catch(() => {}); render(); }
+        // The answer was lost but the cancellation is on the row: it landed.
+        if (!DEMO && landedUnheard(e, swaps, id, v => v.status === "cancelled")) {
+          await db(`UPDATE ${P}swap_requests SET status='cancelled', updated_at=? WHERE id=?`, [new Date().toISOString(), id]).catch(() => {});
+          return;
+        }
+        hubAlert(agreementFailureLine(e, {
+          action: "cancel the swap request", thing: "swap request",
+          state: DEMO ? undefined : reReadState(swaps, id),
+        }));
+      }
     }
 
     async function onSaveHandoff() {
@@ -3041,7 +3221,8 @@
         notifyPartner("Handoff note", `${me?.name} added a ${category} note for ${memberName(child_id)}.`, { view: "handoffs" });
       } catch (e) {
         btn.disabled = false; btn.textContent = "Add note";
-        hubAlert(e.message);
+        console.error("add handoff note failed", e);
+        hubAlert(failureLine(e, { action: "add the note", thing: "handoff note" }));
       }
     }
 

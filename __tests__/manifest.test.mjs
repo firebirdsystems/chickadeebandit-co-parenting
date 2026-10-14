@@ -230,8 +230,8 @@ describe("manifest ↔ app agreement", async () => {
   it("keeps the custody journal append-only, adult-read, and retained like the custody record", () => {
     const policy = manifest.row_policies.custody_log;
     expect(policy).toMatchObject({ kind: "endpoint_only", read: "adult", audit_writes: true });
-    expect(policy.retain_days).toEqual({ default: 400, timestamp_column: "day", tier: "evidentiary" });
-    expect(manifest.row_policies.custody_days.retain_days.default).toBe(policy.retain_days.default);
+    expect(manifest.retention.custody_log).toEqual({ default: 400, timestamp_column: "day", tier: "evidentiary" });
+    expect(manifest.retention.custody_days.default).toBe(manifest.retention.custody_log.default);
     const rec = manifest.append_only_records.custody_log;
     expect(rec.write_acl).toEqual({ require_role: "adult" });
     expect(rec.required_columns).toEqual(["child_id", "day", "kind"]);
