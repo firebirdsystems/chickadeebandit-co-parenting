@@ -1924,6 +1924,7 @@ export function agreementFailureLine(e, { action, thing, state } = {}) {
   if (e?.forUser) return e.message;
   const status = Number(e?.status) || 0;
   if (status === 409 && e?.retryAfter) return "Another change to this schedule is being applied — try again in a moment.";
+  if (status === 409 && e?.code === "proposal_limit") return "You have too many proposals waiting — withdraw one first.";
   if (status === 403) return `You don’t have permission to ${action}.`;
   if (status === 507) return "The household’s storage is full — free up space first.";
   if (status === 429) return "Too many tries — wait a minute and try again.";

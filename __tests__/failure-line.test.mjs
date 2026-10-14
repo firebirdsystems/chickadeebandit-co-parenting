@@ -60,6 +60,13 @@ describe("agreementFailureLine", () => {
     expect(agreementFailureLine(err({ status: 400 }), { ...sign, state: "answered" })).toBe("This proposal was already answered.");
     expect(agreementFailureLine(err({ status: 409 }), { ...sign, state: "answered" })).toBe("This proposal was already answered.");
   });
+  it("names the open-proposals cap from its code; a plain 409 stays neutral", () => {
+    const propose = { action: "send this schedule", thing: "proposal" };
+    expect(agreementFailureLine(err({ status: 409, code: "proposal_limit" }), propose))
+      .toBe("You have too many proposals waiting — withdraw one first.");
+    expect(agreementFailureLine(err({ status: 409 }), propose))
+      .toBe("Something changed while you had this open — check it first.");
+  });
   it("says when the version in force was replaced", () => {
     expect(agreementFailureLine(err({ status: 409 }), { action: "countersign this schedule", thing: "custody schedule", state: "replaced" }))
       .toBe("This custody schedule is no longer the one in force — check the current one.");

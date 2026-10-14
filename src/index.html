@@ -2721,7 +2721,12 @@
               // already fills it): read back by the kept id. Found means an
               // earlier press landed.
               if (!outcomeUnknown(e) && e?.status !== 403) throw e;
-              const stored = (await db(`SELECT * FROM ${P}schedule_drafts WHERE id = ?`, [newId]).catch(() => null))?.rows?.[0];
+              // The id is ours: with the read-back failed, a UNIQUE answer (or the
+              // cap's 403) may be this form's own first press, so nothing is
+              // known — "try again", not "already exists" or the permission line.
+              const read = await db(`SELECT * FROM ${P}schedule_drafts WHERE id = ?`, [newId]).catch((readErr) => { console.error(readErr); return null; });
+              if (!read) throw new Error("draft outcome unknown", { cause: e });
+              const stored = read.rows?.[0];
               if (!stored) throw e;
               // An earlier press stored a draft for another child (the select
               // changed since): that one stands, and this child's gets its own id.
