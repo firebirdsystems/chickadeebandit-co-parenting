@@ -1648,7 +1648,9 @@
 
     // Opening a record does NOT set "First viewed": the hub stamps that only
     // when a conversation is opened in Messages.
-    function openReport(id, format) {
+    /** The range a document is made for, refreshed and checked; false after
+     *  telling the person why there is nothing to make. */
+    function settleRecordRange() {
       // A tab left open past midnight (the household's or UTC's) still shows
       // yesterday as the default end; the document must not stop there.
       if (!recordRangeEdited) {
@@ -1658,12 +1660,82 @@
         if (toEl) toEl.value = recordTo;
       }
       // The hub refuses an inverted range; say so here rather than in a new tab.
-      if (recordFrom && recordTo && recordFrom > recordTo) { hubAlert("From must not be later than To."); return; }
+      if (recordFrom && recordTo && recordFrom > recordTo) { hubAlert("From must not be later than To."); return false; }
+      return true;
+    }
+
+    function openReport(id, format) {
+      if (!settleRecordRange()) return;
       const url = new URL(`${REPORTS_URL}/${encodeURIComponent(id)}`, window.location.href);
       url.searchParams.set("format", format);
       if (recordFrom) url.searchParams.set("from", recordFrom);
       if (recordTo) url.searchParams.set("to", recordTo);
       window.open(url.toString(), "_blank", "noopener");
+    }
+
+    /**
+     * A verified copy is issued by a POST (it records an attestation that
+     * outlives the household), so it cannot be a link. "download" hands the
+     * file back here and to the browser under the name the hub gave it;
+     * "email" has the hub send it to the member's own sign-in address — the
+     * way to get one on a phone, where a download from the app cannot land.
+     * One at a time; the hub takes a few seconds to make it.
+     */
+    let verifiedBusy = null; // null, or the delivery being made: "download" | "email"
+    async function requestVerifiedCopy(id, deliver) {
+      if (verifiedBusy || !settleRecordRange()) return;
+      // Drawn from this flag by renderRecords, so a redraw mid-request (a tab
+      // switch and back) still shows the copy being made.
+      // Taken before the first redraw replaces the pressed (now disabled) button.
+      const hadFocus = document.activeElement?.dataset?.verifiedDeliver === deliver;
+      verifiedBusy = deliver;
+      redrawRecordsKeepingFocus(deliver, hadFocus);
+      try {
+        const res = await fetch(`${REPORTS_URL}/${encodeURIComponent(id)}/verified`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: deliver === "email" ? "application/json" : "application/pdf" },
+          body: JSON.stringify({
+            ...(recordFrom ? { from: recordFrom } : {}),
+            ...(recordTo ? { to: recordTo } : {}),
+            deliver,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          hubAlert(body?.error || "The verified copy could not be made. Try again.");
+          return;
+        }
+        if (deliver === "email") {
+          const body = await res.json().catch(() => null);
+          hubAlert(`Verified copy sent to ${body?.sent_to || "your email"}. Forward the attached PDF as it is.`);
+          return;
+        }
+        const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "verified-record.pdf";
+        const url = URL.createObjectURL(await res.blob());
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      } catch {
+        hubAlert("The verified copy could not be made. Check your connection and try again.");
+      } finally {
+        verifiedBusy = null;
+        redrawRecordsKeepingFocus(deliver, hadFocus);
+      }
+    }
+    /** Redraws only while Records is showing (a redraw elsewhere would reset a
+     *  half-filled form). Focus goes back to the button the person pressed
+     *  only when nothing else has taken it since: the redraw dropped it to the
+     *  page, never out of a dialog they opened meanwhile. While the button is
+     *  disabled it cannot hold focus; the last redraw puts it back. */
+    function redrawRecordsKeepingFocus(deliver, hadFocus) {
+      if (view !== "records") return;
+      const dropped = document.activeElement === document.body || document.activeElement?.dataset?.verifiedDeliver === deliver;
+      render();
+      if (hadFocus && dropped) document.querySelector(`[data-verified-deliver="${deliver}"]:not([disabled])`)?.focus();
     }
 
     function renderRecords(el) {
@@ -1689,6 +1761,12 @@
       // renderer lists html and json alone, and the button would only 503.
       const fullRecordPdf = !!reportFullRecord && Array.isArray(reportFullRecord.formats)
         && reportFullRecord.formats.includes("pdf");
+      const fullRecordVerified = !!reportFullRecord && Array.isArray(reportFullRecord.verified_formats)
+        && reportFullRecord.verified_formats.includes("pdf");
+      // Both disabled while either is working; the label changes on the one pressed.
+      const verifiedBtn = (deliver, label, busyLabel) =>
+        `<button class="btn btn-sm" data-verified="${esc(reportFullRecord.id)}" data-verified-deliver="${deliver}" data-testid="record-verified-${deliver}"`
+        + `${verifiedBusy ? ` disabled aria-busy="${verifiedBusy === deliver}"` : ""}>${verifiedBusy === deliver ? busyLabel : label}</button>`;
       const btn = (id, format, label, primary) =>
         `<button class="btn btn-sm${primary ? " btn-primary" : ""}" data-report="${esc(id)}" data-format="${format}">${esc(label)}</button>`;
 
@@ -1705,7 +1783,10 @@
             ? "Every report below for the dates chosen, in one document with a cover page, a checksum per section and a package checksum. The PDF is made by the hub and takes a few seconds; every page carries the package checksum."
             : "Every report below for the dates chosen, in one document with a cover page, a checksum per section and a package checksum. Open it and save it as a PDF.",
           btn(reportFullRecord.id, "html", "Open full record", true)
-            + (fullRecordPdf ? " " + btn(reportFullRecord.id, "pdf", "Download PDF") : "")) : ""}
+            + (fullRecordPdf ? " " + btn(reportFullRecord.id, "pdf", "Download PDF") : "")
+            + (fullRecordVerified ? " " + verifiedBtn("download", "Download verified copy", "Making verified copy…")
+              + " " + verifiedBtn("email", "Email me a verified copy", "Sending verified copy…") : "")) : ""}
+        ${fullRecordVerified ? `<div class="card muted" data-testid="record-verified-note">A verified copy is a PDF with a verification ID and QR code on its cover. Whoever you give it to can open the address printed on it, choose the file, and see that it is exactly what was issued and unchanged. Send the file itself: a printout, a scan or a copy saved again from a PDF viewer cannot be checked. On a phone, use Email me: the copy arrives as an attachment you can forward.</div>` : ""}
         ${reportViews.map(v => row(v.id, v.title, v.description,
           btn(v.id, "html", "Open") + " " + btn(v.id, "csv", "CSV"))).join("")}
         ${!reportViews.length && !reportFullRecord ? `<div class="empty">No records are offered.</div>` : ""}`;
@@ -1714,6 +1795,8 @@
       el.querySelector("#rec-to").addEventListener("change", e => { recordTo = e.target.value; recordRangeEdited = true; });
       el.querySelectorAll("[data-report]").forEach(b =>
         b.addEventListener("click", () => openReport(b.dataset.report, b.dataset.format)));
+      el.querySelectorAll("[data-verified]").forEach(b =>
+        b.addEventListener("click", () => requestVerifiedCopy(b.dataset.verified, b.dataset.verifiedDeliver)));
     }
 
     // ── Handoffs view ────────────────────────────────────────────────────────
