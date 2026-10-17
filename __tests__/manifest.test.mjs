@@ -344,6 +344,8 @@ describe("manifest ↔ app agreement", async () => {
     ]);
     expect(view.source.query).toContain("json_each(");
     expect(view.source.query).not.toContain("rules AS rules");
+    // The hub writes each rule out in words; the query only hands it the rule.
+    expect(view.columns.find((c) => c.key === "falls").format).toBe("recurring_rule");
   });
 
   // One definition of a proposal's terms, for the form and the draft alike.

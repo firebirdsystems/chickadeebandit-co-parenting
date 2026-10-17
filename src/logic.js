@@ -1729,14 +1729,23 @@ export function parseHolidayRules(value) {
  */
 export function holidayForDate(holiday, dateStr) {
   if (!holiday) return null;
-  const rules = parseHolidayRules(holiday.rules);
   const parties = { a: holiday.parent_a_id, b: holiday.parent_b_id };
+  const winner = holidayWinner(parseHolidayRules(holiday.rules), parties, dateStr);
+  return winner?.parent_id ? { parent_id: winner.parent_id, rule: winner.rule } : null;
+}
+
+/** The rule that takes `dateStr`, with who it gives the day to (null when that
+ *  year follows the rotation), or null when no rule covers the day. */
+function holidayWinner(rules, parties, dateStr, spans = new Map()) {
   const day = toDayNumber(dateStr);
   const year = Number(String(dateStr).slice(0, 4));
   let winner = null;
   rules.forEach((rule, index) => {
     for (const y of [year - 1, year]) {
-      const span = holidaySpan(rule, y);
+      // `spans` caches one rule-year's span across the days a caller resolves.
+      const key = `${index}:${y}`;
+      if (!spans.has(key)) spans.set(key, holidaySpan(rule, y));
+      const span = spans.get(key);
       if (!span) continue;
       const s = toDayNumber(span.start), e = toDayNumber(span.end);
       if (day < s || day > e) continue;
@@ -1749,34 +1758,52 @@ export function holidayForDate(holiday, dateStr) {
       }
     }
   });
-  return winner?.parent_id ? { parent_id: winner.parent_id, rule: winner.rule } : null;
+  return winner;
 }
 
-/** The next time a rule gives someone the day, from `todayStr` on:
- *  { start, end, parent_id } or null. Looks three years ahead. */
-export function nextHolidayOccurrence(rule, parties, todayStr) {
+/**
+ * The next day rule `index` of `rules` actually gives someone, from `todayStr`
+ * on: { start, parent_id } or null. Looks three years ahead. A day another
+ * rule overrides is not this rule's (a shorter Christmas Eve inside a winter
+ * break), so each day is resolved against the whole schedule, as the hub
+ * resolves it. Rules are told apart by position, not id: the hub does not
+ * require ids to be unique. `rules` is parseHolidayRules output, `parties`
+ * the version's { a, b } parent ids.
+ */
+export function nextHolidayOccurrence(rules, parties, index, todayStr) {
+  const rule = rules[index];
+  if (!rule) return null;
+  const today = toDayNumber(todayStr);
   const year = Number(String(todayStr).slice(0, 4));
+  const spans = new Map();
   for (let y = year - 1; y <= year + 3; y++) {
     const span = holidaySpan(rule, y);
-    if (!span || span.end < todayStr) continue;
-    const parent_id = parties[y % 2 === 0 ? rule.even_years : rule.odd_years];
-    if (!parent_id) continue;
-    return { ...span, parent_id };
+    // A year the rule leaves to the rotation gives nobody its days: skip it
+    // rather than resolve each of them.
+    if (!span || !parties[y % 2 === 0 ? rule.even_years : rule.odd_years]) continue;
+    for (let d = Math.max(toDayNumber(span.start), today); d <= toDayNumber(span.end); d++) {
+      const start = fromDayNumber(d);
+      const winner = holidayWinner(rules, parties, start, spans);
+      if (winner?.index === index && winner.parent_id) return { start, parent_id: winner.parent_id };
+    }
   }
   return null;
 }
 
-/** "the fourth Thursday of November, for 4 days" — when a rule falls, in words. */
+/** "the fourth Thursday of November, for 4 days" — when a rule falls, in words.
+ *  Worded as the hub's report words it (`recurring_rule`). */
 export function describeHolidayRule(rule) {
   const length = rule.length_days > 1 ? `, for ${rule.length_days} days` : "";
-  if (rule.kind === "fixed") return `${MONTHS[rule.month - 1]} ${rule.day}${length}`;
+  // A leap day lands on the 28th in other years (the hub clamps); say so.
+  const monthDay = (m, d) => (m === 2 && d >= 29 ? "the last day of February" : `${MONTHS[m - 1]} ${d}`);
+  if (rule.kind === "fixed") return `${monthDay(rule.month, rule.day)}${length}`;
   if (rule.kind === "nth_weekday") return `the ${ORDINALS[rule.week]} ${WEEKDAYS[rule.weekday]} of ${MONTHS[rule.month - 1]}${length}`;
   if (rule.kind === "easter") {
     const off = rule.offset_days ?? 0;
     const from = off === 0 ? "Easter Sunday" : `${Math.abs(off)} day${Math.abs(off) === 1 ? "" : "s"} ${off < 0 ? "before" : "after"} Easter Sunday`;
     return `${from}${length}`;
   }
-  if (rule.kind === "range") return `${MONTHS[rule.start.month - 1]} ${rule.start.day} to ${MONTHS[rule.end.month - 1]} ${rule.end.day}`;
+  if (rule.kind === "range") return `${monthDay(rule.start.month, rule.start.day)} to ${monthDay(rule.end.month, rule.end.day)}`;
   return "";
 }
 

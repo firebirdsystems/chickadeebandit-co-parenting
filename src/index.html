@@ -1191,10 +1191,11 @@
 
     function holidayRulesHtml(holiday) {
       const rules = parseHolidayRules(holiday.rules);
-      const parties = { a: holiday.parent_a_id, b: holiday.parent_b_id };
       if (!rules.length) return `<p class="muted">No rules could be read from this document.</p>`;
-      return rules.map(rule => {
-        const next = nextHolidayOccurrence(rule, parties, todayStr());
+      const parties = { a: holiday.parent_a_id, b: holiday.parent_b_id };
+      const today = todayStr();
+      return rules.map((rule, index) => {
+        const next = nextHolidayOccurrence(rules, parties, index, today);
         return `
           <div data-testid="holiday-rule" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
             <div class="spread">

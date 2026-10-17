@@ -2131,12 +2131,32 @@ describe("holiday proposals", () => {
     expect(describeHolidayRule(preset("easter"))).toBe("2 days before Easter Sunday, for 3 days");
     expect(describeHolidayRule(preset("winter-break"))).toBe("December 20 to January 3");
     expect(describeHolidayRule(rule)).toBe("July 4");
+    // Worded as the hub's report words it: a leap day lands on the 28th otherwise.
+    expect(describeHolidayRule({ ...rule, month: 2, day: 29 })).toBe("the last day of February");
   });
   it("finds the next occurrence and who has it, skipping years the rule names nobody", () => {
     const parties = { a: "mom", b: "dad" };
-    expect(nextHolidayOccurrence(rule, parties, "2026-07-05")).toEqual({ start: "2027-07-04", end: "2027-07-04", parent_id: "dad" });
-    expect(nextHolidayOccurrence({ ...rule, odd_years: null }, parties, "2026-07-05")).toEqual({ start: "2028-07-04", end: "2028-07-04", parent_id: "mom" });
-    expect(nextHolidayOccurrence(rule, parties, "2026-07-04").start).toBe("2026-07-04");
+    expect(nextHolidayOccurrence([rule], parties, 0, "2026-07-05")).toEqual({ start: "2027-07-04", parent_id: "dad" });
+    expect(nextHolidayOccurrence([{ ...rule, odd_years: null }], parties, 0, "2026-07-05")).toEqual({ start: "2028-07-04", parent_id: "mom" });
+    expect(nextHolidayOccurrence([rule], parties, 0, "2026-07-04").start).toBe("2026-07-04");
+    expect(nextHolidayOccurrence([rule], parties, 1, "2026-07-04")).toBeNull();
+  });
+  it("names only the days a rule wins when a shorter rule overrides part of it", () => {
+    const winter = { id: "winter", label: "Winter break", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: "a", odd_years: "b" };
+    const eve = { id: "eve", label: "Christmas Eve", kind: "fixed", month: 12, day: 20, length_days: 2, even_years: "b", odd_years: "a" };
+    const parties = { a: "mom", b: "dad" };
+    const holiday = { rules: JSON.stringify([winter, eve]), parent_a_id: "mom", parent_b_id: "dad" };
+    // Dec 20-21 are Christmas Eve's (shorter wins), so winter break starts the 22nd.
+    expect(nextHolidayOccurrence([winter, eve], parties, 1, "2026-10-16")).toEqual({ start: "2026-12-20", parent_id: "dad" });
+    expect(nextHolidayOccurrence([winter, eve], parties, 0, "2026-10-16")).toEqual({ start: "2026-12-22", parent_id: "mom" });
+    // Agrees with the day resolver on every day it names.
+    expect(holidayForDate(holiday, "2026-12-20").rule.id).toBe("eve");
+    expect(holidayForDate(holiday, "2026-12-22").rule.id).toBe("winter");
+    // A day already under way counts from today.
+    expect(nextHolidayOccurrence([winter, eve], parties, 0, "2026-12-25").start).toBe("2026-12-25");
+    // Two rules sharing an id are still two rules.
+    const twin = { ...eve, id: "winter" };
+    expect(nextHolidayOccurrence([winter, twin], parties, 0, "2026-10-16").start).toBe("2026-12-22");
   });
   it("strips editor bookkeeping from the agreed document", () => {
     expect(cleanHolidayRule({ ...rule, on: true, same: true })).toEqual(rule);
