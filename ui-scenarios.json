@@ -554,7 +554,7 @@
       ]
     },
     {
-      "name": "a parent records an exchange, corrects it with a second entry, and both stay on the record",
+      "name": "a parent records an exchange, corrects it with a second entry, both stay on the record, and a dated journal entry joins them",
       "members": {
         "parent": "adult",
         "kid": "child"
@@ -738,6 +738,42 @@
           "action": "expectText",
           "text": "replaced",
           "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-newjournal]",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "#j-note",
+          "as": "parent"
+        },
+        {
+          "action": "fill",
+          "selector": "#j-note",
+          "value": "Scraped knee at the park; cleaned and bandaged.",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "#save-journal",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-testid=\"journal-note\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Scraped knee at the park",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Dated entries on the record",
+          "as": "parent"
         }
       ]
     },
@@ -770,6 +806,49 @@
         {
           "action": "expectText",
           "text": "part of the full record",
+          "as": "parent"
+        }
+      ]
+    },
+    {
+      "name": "the Records tab offers the agreed schedule and holidays as their own documents",
+      "members": {
+        "parent": "adult",
+        "kid": "child"
+      },
+      "steps": [
+        {
+          "action": "open",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-tab=\"records\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-record=\"agreed_schedule\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-record=\"agreed_holidays\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-record=\"agreed_schedule\"] [data-report=\"agreed_schedule\"][data-format=\"html\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectVisible",
+          "selector": "[data-record=\"full_record\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "Agreed parenting schedule",
           "as": "parent"
         }
       ]

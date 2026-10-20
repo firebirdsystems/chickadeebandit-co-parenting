@@ -124,14 +124,32 @@
   <script type="module">
     import {
       memberColor, initial, esc, isAdult, hubConfirm, hubAlert,
-      sendHubNotification, hubAppUrl, hubToday, glyph, chickadee,
+      sendHubNotification, hubAppUrl, hubToday, glyph, chickadee, createFilesHelper,
     } from "/hub-sdk.js";
+
+    // Journal photos go through the hub's file store. Absent the files URL
+    // (demo, or a hub that offers none) the journal simply takes no photos.
+    const files = createFilesHelper(window.__FILES_URL ?? "");
+    const PHOTOS_ON = !!window.__FILES_URL;
+    const MAX_PHOTOS_PER_ENTRY = 4;
+    const JOURNAL_NOTES_SHOWN = 20;
+    let journalNotesExpanded = false;
+    /** Whether THIS adult is offered photos. The hub's rule is the steward
+     *  lock (file_acls.write.steward_household_only: a member of a parent's
+     *  household); this is an approximation of it from what the app can see —
+     *  the pairing and the agreements name the two parents. It errs towards
+     *  withholding the field: a supporting adult can still write entries, and
+     *  a refused upload after the entry is on the record is the worse outcome. */
+    function canPhoto() {
+      return PHOTOS_ON && !!me && (!!partnerId || versions.some(v => v.parent_a_id === me.id || v.parent_b_id === me.id));
+    }
 
     // Static markup cannot call the SDK helpers, so fill the heading glyph from script.
     document.getElementById("page-glyph").innerHTML = glyph("compass");
     import {
       effectiveForDate, normalizeCycle, addDays, validateSwap, buildCustodyDays,
       nextTransition, upcomingTransitions, groupNotesByTransition, recentTransitions, exchangeOutcome, actualParentForDay, parentingTimeSummary,
+      photosByEntry, journalNotes,
       HOLIDAY_PRESETS, holidayForDate, nextHolidayOccurrence, describeHolidayRule, parseHolidayRules,
       holidayRulesBlocker, holidayProposalTerms, mergeHolidayVersion, holidaySnapshot,
       notesForTransition, describeScheduleChange,
@@ -211,6 +229,7 @@
     /** The custody journal — each parent's account of exchanges and of where a
      *  child actually was. Append-only; read with the handoff notes. */
     let custodyLog = [];
+    let journalPhotos = [];   // journal_photos rows: photos attached to custody_log entries
     /** Holiday schedules — the amendment and the hub's agreement row merged,
      *  one record per proposal, like `versions`. Adults only. */
     let holidayVersions = [];
@@ -373,6 +392,10 @@
       // when this text is exactly the manifest's, so they are not built from P.
       const none = () => ({ rows: [] });
       const today = todayStr();
+      // A read that started before a local append landed must not unsend it
+      // (the same guard refreshJournal keeps): the journal arrays are adopted
+      // only when nothing was appended while the read was out.
+      const journalVersionBefore = journalVersion;
       let versionsFailed = false, adultFailed = false;
       const failed = () => { adultFailed = true; return none(); };
       const [amd, ver, sr, sa, cd, adultOnly] = await Promise.all([
@@ -391,6 +414,7 @@
               // the row policy's, not ours — owner_only appends it — so an app-side
               // filter here would be decoration, and its absence is not a leak.
               db("SELECT * FROM app_co_parenting__schedule_drafts ORDER BY updated_at DESC").catch(failed),
+              db(`SELECT * FROM ${P}journal_photos ORDER BY created_at`).catch(failed),
             ])
           : null),
       ]);
@@ -439,8 +463,9 @@
       else custodyReadFailed = true;
 
       if (adultOnly) {
-        const [hn, cl, ha, hv, dr] = adultOnly;
-        handoffs = hn.rows; custodyLog = cl.rows; drafts = dr.rows;
+        const [hn, cl, ha, hv, dr, jp] = adultOnly;
+        drafts = dr.rows;
+        if (journalVersionBefore === journalVersion) { handoffs = hn.rows; custodyLog = cl.rows; journalPhotos = jp.rows; }
         // Merged by id like the standing schedule: both are governed tables, so
         // a JOIN is rejected, and an agreed version outlives its amendment row.
         const hvById = new Map(hv.rows.map(v => [v.id, v]));
@@ -650,6 +675,7 @@
     ];
 
     function render() {
+      photoMap = null;   // every draw groups the photos afresh (see photoStrip)
       journalRedrawOwed = false;   // this draw shows whatever was adopted
       const tabsEl = document.getElementById("tabs");
       if (loadFailed) {
@@ -666,9 +692,11 @@
         b.addEventListener("click", () => {
           view = b.dataset.tab;
           render();
-          // An answer from the other parent in the journal is only ever
-          // noticed by looking, and this is the look.
-          if (JOURNAL_VIEWS.has(view)) refreshJournal();
+          // What the other parent did — countersigned, swapped, answered — is
+          // only ever noticed by looking, and this is the look. The journal
+          // is cheap and read every time; the agreements and the projected
+          // days are read again when the last read is old enough to matter.
+          if (!refreshData()) { if (JOURNAL_VIEWS.has(view)) refreshJournal(); }
         }));
 
       const el = document.getElementById("content");
@@ -1665,12 +1693,19 @@
       return true;
     }
 
+    /** Whether a document takes the From / To range: the index says so per
+     *  view; the full record always does. A plan report does not, and a
+     *  range is neither sent for it nor checked before opening it. */
+    function reportRangeable(id) {
+      return id === reportFullRecord?.id || (reportViews?.find(v => v.id === id)?.rangeable ?? true);
+    }
     function openReport(id, format) {
-      if (!settleRecordRange()) return;
+      const ranged = reportRangeable(id);
+      if (ranged && !settleRecordRange()) return;
       const url = new URL(`${REPORTS_URL}/${encodeURIComponent(id)}`, window.location.href);
       url.searchParams.set("format", format);
-      if (recordFrom) url.searchParams.set("from", recordFrom);
-      if (recordTo) url.searchParams.set("to", recordTo);
+      if (ranged && recordFrom) url.searchParams.set("from", recordFrom);
+      if (ranged && recordTo) url.searchParams.set("to", recordTo);
       window.open(url.toString(), "_blank", "noopener");
     }
 
@@ -1682,22 +1717,24 @@
      * way to get one on a phone, where a download from the app cannot land.
      * One at a time; the hub takes a few seconds to make it.
      */
-    let verifiedBusy = null; // null, or the delivery being made: "download" | "email"
+    let verifiedBusy = null; // null, or the copy being made: "<document id>|download" | "<document id>|email"
     async function requestVerifiedCopy(id, deliver) {
-      if (verifiedBusy || !settleRecordRange()) return;
+      const ranged = reportRangeable(id);
+      if (verifiedBusy || (ranged && !settleRecordRange())) return;
       // Drawn from this flag by renderRecords, so a redraw mid-request (a tab
       // switch and back) still shows the copy being made.
       // Taken before the first redraw replaces the pressed (now disabled) button.
-      const hadFocus = document.activeElement?.dataset?.verifiedDeliver === deliver;
-      verifiedBusy = deliver;
-      redrawRecordsKeepingFocus(deliver, hadFocus);
+      const key = `${id}|${deliver}`;
+      const hadFocus = document.activeElement?.dataset?.verified === id && document.activeElement?.dataset?.verifiedDeliver === deliver;
+      verifiedBusy = key;
+      redrawRecordsKeepingFocus(id, deliver, hadFocus);
       try {
         const res = await fetch(`${REPORTS_URL}/${encodeURIComponent(id)}/verified`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: deliver === "email" ? "application/json" : "application/pdf" },
           body: JSON.stringify({
-            ...(recordFrom ? { from: recordFrom } : {}),
-            ...(recordTo ? { to: recordTo } : {}),
+            ...(ranged && recordFrom ? { from: recordFrom } : {}),
+            ...(ranged && recordTo ? { to: recordTo } : {}),
             deliver,
           }),
         });
@@ -1724,7 +1761,7 @@
         hubAlert("The verified copy could not be made. Check your connection and try again.");
       } finally {
         verifiedBusy = null;
-        redrawRecordsKeepingFocus(deliver, hadFocus);
+        redrawRecordsKeepingFocus(id, deliver, hadFocus);
       }
     }
     /** Redraws only while Records is showing (a redraw elsewhere would reset a
@@ -1732,11 +1769,12 @@
      *  only when nothing else has taken it since: the redraw dropped it to the
      *  page, never out of a dialog they opened meanwhile. While the button is
      *  disabled it cannot hold focus; the last redraw puts it back. */
-    function redrawRecordsKeepingFocus(deliver, hadFocus) {
+    function redrawRecordsKeepingFocus(id, deliver, hadFocus) {
       if (view !== "records") return;
-      const dropped = document.activeElement === document.body || document.activeElement?.dataset?.verifiedDeliver === deliver;
+      const active = document.activeElement;
+      const dropped = active === document.body || (active?.dataset?.verified === id && active?.dataset?.verifiedDeliver === deliver);
       render();
-      if (hadFocus && dropped) document.querySelector(`[data-verified-deliver="${deliver}"]:not([disabled])`)?.focus();
+      if (hadFocus && dropped) document.querySelector(`[data-verified="${CSS.escape(id)}"][data-verified-deliver="${deliver}"]:not([disabled])`)?.focus();
     }
 
     function renderRecords(el) {
@@ -1760,16 +1798,34 @@
         </div>`;
       // Offered only when the hub says it can make one: a hub without the
       // renderer lists html and json alone, and the button would only 503.
-      const fullRecordPdf = !!reportFullRecord && Array.isArray(reportFullRecord.formats)
-        && reportFullRecord.formats.includes("pdf");
-      const fullRecordVerified = !!reportFullRecord && Array.isArray(reportFullRecord.verified_formats)
-        && reportFullRecord.verified_formats.includes("pdf");
+      // Each document says so for itself (an older hub lists formats on the
+      // full record alone, and then only it gets the buttons).
+      const offersPdf = (doc) => !!doc && Array.isArray(doc.formats) && doc.formats.includes("pdf");
+      const offersVerified = (doc) => !!doc && Array.isArray(doc.verified_formats) && doc.verified_formats.includes("pdf");
+      const fullRecordPdf = offersPdf(reportFullRecord);
+      const fullRecordVerified = offersVerified(reportFullRecord);
       // Both disabled while either is working; the label changes on the one pressed.
-      const verifiedBtn = (deliver, label, busyLabel) =>
-        `<button class="btn btn-sm" data-verified="${esc(reportFullRecord.id)}" data-verified-deliver="${deliver}" data-testid="record-verified-${deliver}"`
-        + `${verifiedBusy ? ` disabled aria-busy="${verifiedBusy === deliver}"` : ""}>${verifiedBusy === deliver ? busyLabel : label}</button>`;
+      const verifiedBtn = (id, deliver, label, busyLabel) => {
+        const busy = verifiedBusy === `${id}|${deliver}`;
+        return `<button class="btn btn-sm" data-verified="${esc(id)}" data-verified-deliver="${deliver}" data-testid="record-verified-${deliver}-${esc(id)}"`
+          + `${verifiedBusy ? ` disabled aria-busy="${busy}"` : ""}>${busy ? busyLabel : label}</button>`;
+      };
       const btn = (id, format, label, primary) =>
         `<button class="btn btn-sm${primary ? " btn-primary" : ""}" data-report="${esc(id)}" data-format="${format}">${esc(label)}</button>`;
+      // The agreed schedule and the agreed holidays are the reports a parent
+      // hands over on their own — to a lawyer, a mediator, a school — so they
+      // are listed first, with the PDF and verified-copy buttons the full
+      // record has, where the hub offers them for a single report. Neither is
+      // date-filtered. Two reports, not one: the hub lets a report read one
+      // agreement table at a time.
+      const PLAN_IDS = ["agreed_schedule", "agreed_holidays"];
+      const plans = PLAN_IDS.map(id => reportViews.find(v => v.id === id)).filter(Boolean);
+      const planCards = plans.map(plan => row(plan.id, plan.title, plan.description ?? "",
+        btn(plan.id, "html", "Open", true)
+          + (offersPdf(plan) ? " " + btn(plan.id, "pdf", "Download PDF") : "")
+          + (offersVerified(plan) ? " " + verifiedBtn(plan.id, "download", "Download verified copy", "Making verified copy…")
+            + " " + verifiedBtn(plan.id, "email", "Email me a verified copy", "Sending verified copy…") : ""))).join("");
+      const anyVerified = fullRecordVerified || plans.some(offersVerified);
 
       el.innerHTML = `
         <div class="card">
@@ -1779,16 +1835,17 @@
             <label class="field"><span>To</span><input type="date" id="rec-to" value="${esc(recordTo)}"></label>
           </div>
         </div>
+        ${planCards}
         ${reportFullRecord ? row(reportFullRecord.id, reportFullRecord.title,
           fullRecordPdf
             ? "Every report below for the dates chosen, in one document with a cover page, a checksum per section and a package checksum. The PDF is made by the hub and takes a few seconds; every page carries the package checksum."
             : "Every report below for the dates chosen, in one document with a cover page, a checksum per section and a package checksum. Open it and save it as a PDF.",
           btn(reportFullRecord.id, "html", "Open full record", true)
             + (fullRecordPdf ? " " + btn(reportFullRecord.id, "pdf", "Download PDF") : "")
-            + (fullRecordVerified ? " " + verifiedBtn("download", "Download verified copy", "Making verified copy…")
-              + " " + verifiedBtn("email", "Email me a verified copy", "Sending verified copy…") : "")) : ""}
-        ${fullRecordVerified ? `<div class="card muted" data-testid="record-verified-note">A verified copy is a PDF with a verification ID and QR code on its cover. Whoever you give it to can open the address printed on it, choose the file, and see that it is exactly what was issued and unchanged. Send the file itself: a printout, a scan or a copy saved again from a PDF viewer cannot be checked. On a phone, use Email me: the copy arrives as an attachment you can forward.</div>` : ""}
-        ${reportViews.map(v => row(v.id, v.title, v.description,
+            + (fullRecordVerified ? " " + verifiedBtn(reportFullRecord.id, "download", "Download verified copy", "Making verified copy…")
+              + " " + verifiedBtn(reportFullRecord.id, "email", "Email me a verified copy", "Sending verified copy…") : "")) : ""}
+        ${anyVerified ? `<div class="card muted" data-testid="record-verified-note">A verified copy is a PDF with a verification ID and QR code on its cover. Whoever you give it to can open the address printed on it, choose the file, and see that it is exactly what was issued and unchanged. Send the file itself: a printout, a scan or a copy saved again from a PDF viewer cannot be checked. On a phone, use Email me: the copy arrives as an attachment you can forward.</div>` : ""}
+        ${reportViews.filter(v => !PLAN_IDS.includes(v.id)).map(v => row(v.id, v.title, v.description,
           btn(v.id, "html", "Open") + " " + btn(v.id, "csv", "CSV"))).join("")}
         ${!reportViews.length && !reportFullRecord ? `<div class="empty">No records are offered.</div>` : ""}`;
 
@@ -1848,14 +1905,36 @@
           ${unanchored.map(h => noteRow(h, { dated: true })).join("")}
         </div>` : "";
 
-      const body = recentHtml + ((groups.length || unanchored.length)
+      // Dated entries not tied to an exchange — an injury, a missed call, how
+      // the child was — each one parent's account, with its photos.
+      const allNotes = journalNotes(custodyLog);
+      // The latest few, like the exchanges beside them; the rest open on
+      // request (and are always in the record).
+      const notes = journalNotesExpanded ? allNotes : allNotes.slice(0, JOURNAL_NOTES_SHOWN);
+      const journalHtml = allNotes.length ? `
+        <div class="card" data-testid="journal-notes">
+          <div class="spread" style="margin-bottom:8px">
+            <strong>Journal</strong>
+            <span class="muted">Dated entries on the record</span>
+          </div>
+          ${notes.map(e => `
+          <div data-testid="journal-note" data-entry="${esc(e.id)}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
+            <div class="spread"><strong>${esc(memberName(e.child_id))}</strong><span class="muted">${esc(fmtHandoffDay(e.day))}</span></div>
+            <div style="white-space:pre-wrap;word-break:break-word;margin-top:4px">${esc(e.note ?? "")}</div>
+            <p class="muted" style="margin:6px 0 0">— ${esc(memberName(e.created_by))}</p>
+            ${photoStrip(e, e.created_by === me?.id)}
+          </div>`).join("")}
+          ${allNotes.length > notes.length ? `<div style="margin-top:8px"><button class="btn btn-sm" data-morenotes>Show all ${allNotes.length} entries</button></div>` : ""}
+        </div>` : "";
+
+      const body = recentHtml + journalHtml + ((groups.length || unanchored.length)
         ? groupHtml + otherHtml
         : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`);
 
       el.innerHTML = `
         <div class="spread" style="margin-bottom:12px">
           <span class="muted">Notes for an exchange — meds, school, mood, items to pack.</span>
-          ${childIds().length ? `<button class="btn btn-primary btn-sm" data-newnote>+ Add note</button>` : ""}
+          ${childIds().length ? `<span><button class="btn btn-sm" data-newjournal>+ Journal entry</button> <button class="btn btn-primary btn-sm" data-newnote>+ Add note</button></span>` : ""}
         </div>
         ${childIds().length ? body : `<div class="empty">Add a custody schedule in Setup first.</div>`}`;
 
@@ -1877,6 +1956,137 @@
         if (kind === "acknowledge") saveLogEntry({ child_id: entry.child_id, day: entry.day, kind, responds_to_id: entry.id }, b, "Acknowledge");
         else openResponseModal(entry);
       }));
+      el.querySelector("[data-newjournal]")?.addEventListener("click", () => openJournalModal());
+      el.querySelector("[data-morenotes]")?.addEventListener("click", () => { journalNotesExpanded = true; render(); });
+      el.querySelectorAll("[data-addphoto]").forEach(b => b.addEventListener("click", () => {
+        const entry = custodyLog.find(e => e.id === b.dataset.addphoto);
+        if (entry) pickPhotos(entry);
+      }));
+    }
+
+    // ── Journal photos ──────────────────────────────────────────────────────
+    // A photo is its own append-only row naming the entry it documents, so an
+    // entry can carry several and none of them can be removed by one parent.
+    // The bytes are readable by every adult in the space (file_acls.read
+    // "adults"), which is who can read the entry beside them.
+
+    /** The photos input for a journal modal; nothing where photos are off. */
+    function photosField(id) {
+      return canPhoto() ? `<label class="field"><span>Photos (optional, up to ${MAX_PHOTOS_PER_ENTRY})</span><input type="file" id="${id}" accept="image/*" multiple></label>` : "";
+    }
+    /** The files picked in a modal, copied out before the modal closes. */
+    function pickedPhotos(id) {
+      return [...(modalEl?.querySelector(`#${id}`)?.files ?? [])].slice(0, MAX_PHOTOS_PER_ENTRY);
+    }
+
+    /** Photos grouped by entry, built once per draw (photoStrip runs per entry). */
+    let photoMap = null;
+    /** Thumbnails under an entry, and "+ Photo" on the entries this parent may still add to. */
+    function photoStrip(entry, canAdd) {
+      photoMap ??= photosByEntry(journalPhotos);
+      const photos = photoMap.get(entry.id) ?? [];
+      const room = canAdd && canPhoto() && photos.length < MAX_PHOTOS_PER_ENTRY && !photosInFlight.has(entry.id);
+      if (!photos.length && !room) return "";
+      return `
+            <div class="row" style="gap:6px;flex-wrap:wrap;margin:6px 0 0 12px;align-items:center" data-testid="journal-photos">
+              ${photos.map(ph => `<a href="${esc(files.url(ph.photo_file_id) ?? "#")}" target="_blank" rel="noopener"><img src="${esc(files.url(ph.thumb_file_id || ph.photo_file_id) ?? "")}" alt="Photo added by ${esc(memberName(ph.created_by))}" style="height:64px;border-radius:6px;display:block"></a>`).join("")}
+              ${room ? `<button class="btn btn-sm" data-addphoto="${esc(entry.id)}">+ Photo</button>` : ""}
+            </div>`;
+    }
+
+    /** Pick photos for an entry already on the record. */
+    function pickPhotos(entry) {
+      const input = document.createElement("input");
+      input.type = "file"; input.accept = "image/*"; input.multiple = true;
+      // In the document, not detached: a WebView (the phone app's hosted
+      // pages) opens no picker for an input that is not on the page.
+      input.hidden = true;
+      document.body.appendChild(input);
+      input.addEventListener("change", () => { attachPhotos(entry, [...input.files].slice(0, MAX_PHOTOS_PER_ENTRY)); input.remove(); });
+      // A cancelled picker fires no change; the input must not stay behind.
+      input.addEventListener("cancel", () => input.remove());
+      input.click();
+    }
+
+    /**
+     * Upload each photo and append its row. One at a time, each shown as it
+     * lands, so a failure part-way leaves the ones that made it on the record
+     * and says how far it got.
+     */
+    /** Entries with an upload under way: "+ Photo" is withheld on them, so a
+     *  second pick cannot count the cap from rows the first has not added yet. */
+    const photosInFlight = new Set();
+    async function attachPhotos(entry, picked) {
+      if (photosInFlight.has(entry.id)) return;
+      const have = journalPhotos.filter(ph => ph.entry_id === entry.id).length;
+      const room = Math.max(0, MAX_PHOTOS_PER_ENTRY - have);
+      const list = picked.slice(0, room);
+      if (!list.length) {
+        if (picked.length) hubAlert(`An entry carries up to ${MAX_PHOTOS_PER_ENTRY} photos.`);
+        return;
+      }
+      photosInFlight.add(entry.id);
+      if (JOURNAL_VIEWS.has(view) && !modalEl) render();
+      let added = 0;
+      try {
+        for (const file of list) {
+          const up = await files.upload(file, { thumbnail: true });
+          const data = { entry_id: entry.id, child_id: entry.child_id, photo_file_id: up.id, ...(up.thumbnailId ? { thumb_file_id: up.thumbnailId } : {}) };
+          let r;
+          try {
+            r = await appendRecord("journal_photos", data);
+          } catch (e) {
+            // Refused: no row names the upload, so it goes (an unfiled upload
+            // is the one thing its uploader may still delete here; its small
+            // copy goes with it). With the answer lost a row may name it, and
+            // it is kept.
+            if (!outcomeUnknown(e)) files.delete(up.id).catch(() => {});
+            // The answer was lost: the row may have landed. Re-read rather
+            // than leave a stored photo unseen until the next poll.
+            // A poll already in flight would hand back its own promise and
+            // then drop its rows (the version moved), so the re-read is queued
+            // behind it.
+            else { journalVersion++; (journalRefresh ?? Promise.resolve()).then(() => refreshJournal()); }
+            throw e;
+          }
+          journalPhotos = [...journalPhotos.filter(ph => ph.id !== r.id), { id: r.id ?? crypto.randomUUID(), ...data, created_by: me?.id, created_at: new Date().toISOString() }];
+          journalVersion++;
+          added++;
+        }
+        if (picked.length > list.length) hubAlert(`${added} added. An entry carries up to ${MAX_PHOTOS_PER_ENTRY} photos.`);
+      } catch (e) {
+        console.error("attach journal photo failed", e);
+        hubAlert(`${added ? `${added} of ${list.length} photos added. ` : ""}${failureLine(e, { action: "add the photo", thing: "photo" })}`);
+      } finally {
+        photosInFlight.delete(entry.id);
+        if (JOURNAL_VIEWS.has(view) && !modalEl) render();
+      }
+    }
+
+    /** A dated journal entry not tied to an exchange. */
+    function openJournalModal() {
+      const kids = childIds();
+      const today = todayStr();
+      openModal(`
+        <h3>Journal entry</h3>
+        <p class="muted">A dated entry on the record — an injury, a missed call, how ${kids.length === 1 ? esc(memberName(kids[0])) : "the child"} was. It cannot be edited or deleted; a correction is another entry.</p>
+        ${kids.length > 1 ? `<label class="field"><span>Child</span><select id="j-child">${kids.map(id => `<option value="${esc(id)}">${esc(memberName(id))}</option>`).join("")}</select></label>` : ""}
+        <label class="field"><span>Date</span><input type="date" id="j-day" value="${esc(today)}" max="${esc(today)}"></label>
+        <label class="field"><span>What happened</span><textarea id="j-note" data-autofocus maxlength="2000" placeholder="What you saw, as you saw it."></textarea></label>
+        ${photosField("j-photos")}
+        <p class="hint">This is your account. ${esc(memberName(partnerId) || "The other parent")} can read it, and it is part of the full record.</p>
+        <div class="modal-actions">
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn btn-primary" id="save-journal">Record</button>
+        </div>`);
+      modalEl.querySelector("#save-journal").addEventListener("click", async () => {
+        const child_id = modalEl.querySelector("#j-child")?.value ?? kids[0];
+        const day = modalEl.querySelector("#j-day").value;
+        const note = modalEl.querySelector("#j-note").value.trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today) { modalEl.querySelector("#j-day").focus(); return; }
+        if (!note) { modalEl.querySelector("#j-note").focus(); return; }
+        await saveLogEntry({ child_id, day, kind: "note", note }, modalEl.querySelector("#save-journal"), "Record", pickedPhotos("j-photos"));
+      });
     }
 
     const OUTCOME_LABEL = {
@@ -1915,7 +2125,8 @@
         return `
           <div class="muted" style="margin-top:6px${stands ? "" : ";opacity:.7"}" data-entry="${esc(e.id)}">
             ${esc(memberName(e.created_by))}: <b>${esc(OUTCOME_LABEL[e.kind] ?? e.kind)}</b>${e.actual_time ? ` at ${esc(fmtExchangeTime(e.actual_time))}` : ""}${e.note ? ` — ${esc(e.note)}` : ""}${stands ? "" : ` <span class="note-cat">replaced</span>`}
-            ${answered.map(r => `<div style="margin-left:12px">${esc(memberName(r.created_by))} ${r.kind === "dispute" ? "disputes this" : "acknowledges this"}${r.note ? `: ${esc(r.note)}` : ""}</div>`).join("")}
+            ${answered.map(r => `<div style="margin-left:12px">${esc(memberName(r.created_by))} ${r.kind === "dispute" ? "disputes this" : "acknowledges this"}${r.note ? `: ${esc(r.note)}` : ""}${r.kind === "dispute" ? photoStrip(r, r.created_by === me?.id) : ""}</div>`).join("")}
+            ${photoStrip(e, mine && stands)}
             ${answerButtons}
           </div>`;
       }).join("");
@@ -1954,11 +2165,12 @@
       journalRefresh = Promise.all([
         db(`SELECT * FROM ${P}custody_log ORDER BY day DESC, created_at DESC`),
         db(`SELECT * FROM ${P}handoff_notes ORDER BY note_date DESC, created_at DESC`),
-      ]).then(([log, notes]) => {
+        db(`SELECT * FROM ${P}journal_photos ORDER BY created_at`),
+      ]).then(([log, notes, photos]) => {
         if (versionBefore !== journalVersion) return;
         const sameIds = (a, b) => a.length === b.length && a.every((row, i) => row.id === b[i]?.id);
-        const changed = !sameIds(log.rows, custodyLog) || !sameIds(notes.rows, handoffs);
-        custodyLog = log.rows; handoffs = notes.rows;
+        const changed = !sameIds(log.rows, custodyLog) || !sameIds(notes.rows, handoffs) || !sameIds(photos.rows, journalPhotos);
+        custodyLog = log.rows; handoffs = notes.rows; journalPhotos = photos.rows;
         if (!changed || !JOURNAL_VIEWS.has(view)) return;
         // Not while a modal is open: redrawing the view under it is harmless,
         // but the modal's own text was drawn from the old rows. The redraw is
@@ -1975,20 +2187,33 @@
 
     /** Append one journal entry. `btn` is disabled while it saves; the entry is
      *  shown at once and the other parent is told. */
-    async function saveLogEntry(data, btn, label) {
+    async function saveLogEntry(data, btn, label, photos = []) {
       if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
       const now = new Date().toISOString();
       try {
-        let id = crypto.randomUUID();
+        // The id is minted once per button and sent with the record, so a
+        // retry after a lost answer finds the entry the first try stored
+        // instead of appending a second one the journal can never remove. The
+        // hub answers a repeat of its own writer's id as stored.
+        // Pinned WITH what was sent: a retry that sends different fields is a
+        // different entry, so it gets a new id rather than being answered with
+        // a record that says something else. The journal is append-only — an
+        // edit after a lost answer is a correction, and a correction is a new
+        // entry, never a silent rewrite of the one the first try may have stored.
+        const payload = JSON.stringify(data);
+        if (btn && btn.dataset.recordPayload !== payload) { delete btn.dataset.recordId; btn.dataset.recordPayload = payload; }
+        let id = btn ? (btn.dataset.recordId ||= crypto.randomUUID()) : crypto.randomUUID();
         if (!DEMO) {
           // An answer goes through its own record, which the hub refuses unless
           // the entry it names exists and is one this parent can read.
           // And "where the child was" has its own, which requires a parent.
           const record = data.kind === "acknowledge" || data.kind === "dispute" ? "custody_answers"
-            : data.kind === "child_with" ? "custody_facts" : "custody_log";
-          const r = await appendRecord(record, data);
+            : data.kind === "child_with" ? "custody_facts"
+            : data.kind === "note" ? "custody_notes" : "custody_log";
+          const r = await appendRecord(record, { id, ...data });
           id = r.id ?? id;
         }
+        if (btn) { delete btn.dataset.recordId; delete btn.dataset.recordPayload; }
         // A refresh that read the table after the hub stored this entry, and
         // landed before the append's own answer did, has already adopted it.
         // Replace that copy rather than add a second one: the same entry drawn
@@ -1998,13 +2223,35 @@
         journalVersion++;
         closeModal(); render();
         const what = data.kind === "child_with" ? `recorded where ${memberName(data.child_id)} was on ${fmtHandoffDay(data.day)}`
+          : data.kind === "note" ? `added a journal entry about ${memberName(data.child_id)} for ${fmtHandoffDay(data.day)}`
           : data.kind === "acknowledge" || data.kind === "dispute" ? `${data.kind === "dispute" ? "disputed" : "acknowledged"} your entry for ${fmtHandoffDay(data.day)}`
           : `recorded ${memberName(data.child_id)}'s exchange on ${fmtHandoffDay(data.day)}: ${(OUTCOME_LABEL[data.kind] ?? data.kind).toLowerCase()}`;
         notifyPartner("Custody journal", `${me?.name} ${what}.`, { view: "handoffs" });
-        return true;
+        // Photos picked with the entry are attached once it is on the record;
+        // a failure there is reported on its own and the entry stands.
+        if (photos.length) await attachPhotos({ id, child_id: data.child_id }, photos);
+        return id;
       } catch (e) {
-        if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
         console.error("save journal entry failed", e);
+        // The answer was lost: the entry may be on the record. Read it back by
+        // the pinned id before offering a retry, so a retry only ever happens
+        // when nothing was stored — and what is shown is what the hub holds.
+        if (!DEMO && btn && outcomeUnknown(e)) {
+          const stored = await db(`SELECT * FROM ${P}custody_log WHERE id = ?`, [btn.dataset.recordId]).then(r => r.rows?.[0] ?? null).catch(() => null);
+          if (stored) {
+            delete btn.dataset.recordId; delete btn.dataset.recordPayload;
+            custodyLog = [stored, ...custodyLog.filter(x => x.id !== stored.id)];
+            journalVersion++;
+            closeModal(); render();
+            notifyPartner("Custody journal", `${me?.name} added to the custody journal for ${fmtHandoffDay(stored.day)}.`, { view: "handoffs" });
+            if (storedDiffers(stored, data)) hubAlert("Your entry was already on the record as first entered. A correction is a new entry.");
+            // The photos picked with it still belong to it: the entry is on the
+            // record, and only the answer was lost.
+            if (photos.length) await attachPhotos({ id: stored.id, child_id: stored.child_id }, photos);
+            return stored.id;
+          }
+        }
+        if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
         // An answer names the entry it answers: a 404 or 409 is about THAT entry.
         hubAlert(failureLine(e, { action: "save the journal entry", thing: "journal entry" }));
         return false;
@@ -2018,6 +2265,7 @@
         <p class="muted">${esc(t.title)} · ${esc(fmtHandoffDay(t.day, todayStr()))}${t.exchange_time ? ` · planned ${esc(fmtExchangeTimeLabel(t))}` : ""}</p>
         ${late ? `<label class="field"><span>Actual time</span><input type="time" id="o-time" data-autofocus value="${esc(t.exchange_time ?? "")}"></label>` : ""}
         <label class="field"><span>Note (optional)</span><textarea id="o-note" ${late ? "" : "data-autofocus"} maxlength="2000" placeholder="${late ? "e.g. Traffic on the bridge." : "e.g. No one at the pickup point; waited 30 minutes."}"></textarea></label>
+        ${photosField("o-photos")}
         <p class="hint">This is your account. ${esc(memberName(partnerId) || "The other parent")} can acknowledge or dispute it, and both accounts stay on the record.</p>
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
@@ -2028,7 +2276,7 @@
         if (late && !/^\d{2}:\d{2}$/.test(actual_time)) { modalEl.querySelector("#o-time").focus(); return; }
         const note = modalEl.querySelector("#o-note").value.trim();
         await saveLogEntry({ child_id: t.child_id, day: t.day, kind, ...(late ? { actual_time } : {}), ...(note ? { note } : {}) },
-          modalEl.querySelector("#save-outcome"), "Record");
+          modalEl.querySelector("#save-outcome"), "Record", pickedPhotos("o-photos"));
       });
     }
 
@@ -2037,6 +2285,7 @@
         <h3>Dispute this entry</h3>
         <p class="muted">${esc(memberName(entry.created_by))} recorded: <b>${esc(OUTCOME_LABEL[entry.kind] ?? entry.kind)}</b>${entry.actual_time ? ` at ${esc(fmtExchangeTime(entry.actual_time))}` : ""} for ${esc(memberName(entry.child_id))} on ${esc(fmtHandoffDay(entry.day, todayStr()))}.</p>
         <label class="field"><span>Your account</span><textarea id="r-note" data-autofocus maxlength="2000" placeholder="What happened, as you saw it."></textarea></label>
+        ${photosField("r-photos")}
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
           <button class="btn btn-primary" id="save-response">Record dispute</button>
@@ -2045,7 +2294,7 @@
         const note = modalEl.querySelector("#r-note").value.trim();
         if (!note) { modalEl.querySelector("#r-note").focus(); return; }
         await saveLogEntry({ child_id: entry.child_id, day: entry.day, kind: "dispute", responds_to_id: entry.id, note },
-          modalEl.querySelector("#save-response"), "Record dispute");
+          modalEl.querySelector("#save-response"), "Record dispute", pickedPhotos("r-photos"));
       });
     }
 
@@ -2055,21 +2304,26 @@
       openModal(`
         <h3>Where was ${esc(memberName(child_id))}?</h3>
         <p class="muted">${esc(fmtHandoffDay(day, todayStr()))}${plannedParentId ? ` · agreed schedule: with ${esc(memberName(plannedParentId))}` : ""}</p>
-        ${existing ? `<p class="muted">${existing.entries.map(e => `${esc(memberName(e.created_by))} recorded: with ${esc(memberName(e.parent_id))}`).join("<br>")}</p>` : ""}
+        ${existing ? `<div class="muted">${existing.entries.map(e => `<div>${esc(memberName(e.created_by))} recorded: with ${esc(memberName(e.parent_id))}${photoStrip(e, e.created_by === me?.id)}</div>`).join("")}</div>` : ""}
         <div class="field"><span>Actually with</span>
           ${choices.map(m => `<label class="row" style="gap:8px"><input type="radio" name="actual" value="${esc(m.id)}" ${m.id === plannedParentId ? "checked" : ""}> ${esc(m.name)}</label>`).join("")}
         </div>
         <label class="field"><span>Note (optional)</span><textarea id="a-note" maxlength="2000"></textarea></label>
+        ${photosField("a-photos")}
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
           <button class="btn btn-primary" id="save-actual">Record</button>
         </div>`);
+      modalEl.querySelectorAll("[data-addphoto]").forEach(b => b.addEventListener("click", () => {
+        const entry = custodyLog.find(e => e.id === b.dataset.addphoto);
+        if (entry) pickPhotos(entry);
+      }));
       modalEl.querySelector("#save-actual").addEventListener("click", async () => {
         const parent_id = modalEl.querySelector('input[name="actual"]:checked')?.value;
         if (!parent_id) return;
         const note = modalEl.querySelector("#a-note").value.trim();
         await saveLogEntry({ child_id, day, kind: "child_with", parent_id, ...(note ? { note } : {}) },
-          modalEl.querySelector("#save-actual"), "Record");
+          modalEl.querySelector("#save-actual"), "Record", pickedPhotos("a-photos"));
       });
     }
 
@@ -2284,7 +2538,7 @@
       // the ones a refresh adopted while this was open (see refreshJournal).
       if (journalRedrawOwed) {
         journalRedrawOwed = false;
-        if (JOURNAL_VIEWS.has(view)) render();
+        render();
       }
     }
     function focusAutofocus(root) {
@@ -3299,18 +3553,37 @@
       btn.disabled = true; btn.textContent = "Saving…";
       const now = new Date().toISOString();
       try {
-        let id = crypto.randomUUID();
+        // Pinned to the button with what was sent, like a journal entry: a
+        // retry after a lost answer finds the note the first try stored; an
+        // edited retry is a different note and gets a new id.
+        const fields = { child_id, note_date, category, body };
+        const payload = JSON.stringify(fields);
+        if (btn.dataset.recordPayload !== payload) { delete btn.dataset.recordId; btn.dataset.recordPayload = payload; }
+        let id = (btn.dataset.recordId ||= crypto.randomUUID());
         if (!DEMO) {
-          const r = await appendRecord("handoff_notes", { child_id, note_date, category, body });
+          const r = await appendRecord("handoff_notes", { id, ...fields });
           id = r.id ?? id;
         }
+        delete btn.dataset.recordId; delete btn.dataset.recordPayload;
         handoffs.unshift({ id, child_id, note_date, category, body, created_by: me?.id, created_at: now });
         journalVersion++;
         closeModal(); render();
         notifyPartner("Handoff note", `${me?.name} added a ${category} note for ${memberName(child_id)}.`, { view: "handoffs" });
       } catch (e) {
-        btn.disabled = false; btn.textContent = "Add note";
         console.error("add handoff note failed", e);
+        if (!DEMO && outcomeUnknown(e)) {
+          const stored = await db(`SELECT * FROM ${P}handoff_notes WHERE id = ?`, [btn.dataset.recordId]).then(r => r.rows?.[0] ?? null).catch(() => null);
+          if (stored) {
+            delete btn.dataset.recordId; delete btn.dataset.recordPayload;
+            handoffs = [stored, ...handoffs.filter(x => x.id !== stored.id)];
+            journalVersion++;
+            closeModal(); render();
+            notifyPartner("Handoff note", `${me?.name} added a ${stored.category} note for ${memberName(stored.child_id)}.`, { view: "handoffs" });
+            if (storedDiffers(stored, { child_id, note_date, category, body })) hubAlert("Your note was already on the record as first entered. A correction is a new note.");
+            return;
+          }
+        }
+        btn.disabled = false; btn.textContent = "Add note";
         hubAlert(failureLine(e, { action: "add the note", thing: "handoff note" }));
       }
     }
@@ -3321,12 +3594,46 @@
       if (v && TABS.some(([id]) => id === v)) view = v;
     }
 
-    // Coming back to the tab is the other moment a stale journal gets noticed.
-    // Scoped to its views so returning to the calendar costs nothing.
+    // Coming back to the app is the other moment stale data gets noticed: a
+    // countersignature or a swap the other parent made while this was in the
+    // background would otherwise keep showing the old parent and handoff until
+    // a reload. Everything is re-read, not only the journal.
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
-      if (JOURNAL_VIEWS.has(view)) refreshJournal();
+      if (!refreshData()) { if (JOURNAL_VIEWS.has(view)) refreshJournal(); }
     });
+
+    /** When loadData last finished, for refreshData's age check. */
+    let dataLoadedAt = 0;
+    let dataRefresh = null;
+    /** Agreements, projection and journal are read again at most this often
+     *  from a look (a tab switch, coming back); a write still re-reads at once. */
+    const REFRESH_MIN_AGE_MS = 20_000;
+
+    /**
+     * Re-read everything the other parent can change — schedule and holiday
+     * versions, swaps, the projected custody days, the pairing, the journal —
+     * when the last read is old enough, and redraw. Returns false when it
+     * did not start (too recent, demo, or one already running), so the caller
+     * can fall back to the cheaper journal read. One at a time; a redraw under
+     * an open modal is owed to closeModal, as for the journal.
+     */
+    function refreshData() {
+      if (DEMO || dataRefresh || Date.now() - dataLoadedAt < REFRESH_MIN_AGE_MS) return false;
+      dataRefresh = (async () => {
+        try {
+          await Promise.all([loadData(), loadPartner().catch(() => {})]);
+          dataLoadedAt = Date.now();
+          if (modalEl) journalRedrawOwed = true;
+          else render();
+        } catch {
+          // Non-fatal: what is on screen stays, and the next look tries again.
+        } finally {
+          dataRefresh = null;
+        }
+      })();
+      return true;
+    }
 
     async function firstLoad() {
       // Members, the partner link and the data are independent requests; only
@@ -3339,6 +3646,7 @@
       // loadData swallows each read's failure, since some are refused by policy
       // for a child; these are the ones it already knows to be real.
       loadFailed = contextFailed || custodyReadFailed || versionsReadFailed || adultReadsFailed;
+      dataLoadedAt = Date.now();
       handleDeepLink();
       render();
       // No journal refresh here: loadData has just read it.

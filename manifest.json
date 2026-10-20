@@ -2,7 +2,7 @@
   "id": "co-parenting",
   "name": "Co-Parenting",
   "version": "1.7.0",
-  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are.",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are. Holiday schedules alternate by year; an exchange journal with photos records how each handoff went; and the agreed schedule prints in words as a PDF or verified copy, as does the whole record.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -131,6 +131,11 @@
       "kind": "endpoint_only",
       "read": "adult",
       "audit_writes": true
+    },
+    "journal_photos": {
+      "kind": "endpoint_only",
+      "read": "adult",
+      "audit_writes": true
     }
   },
   "retention": {
@@ -142,7 +147,32 @@
     "custody_log": {
       "default": 400,
       "timestamp_column": "day",
-      "tier": "evidentiary"
+      "tier": "evidentiary",
+      "dependent_tables": [
+        {
+          "table": "journal_photos",
+          "foreign_key": "entry_id",
+          "file_id_column": [
+            "photo_file_id",
+            "thumb_file_id"
+          ]
+        }
+      ]
+    }
+  },
+  "file_columns": {
+    "journal_photos": {
+      "columns": [
+        "photo_file_id",
+        "thumb_file_id"
+      ]
+    }
+  },
+  "file_acls": {
+    "read": "adults",
+    "write": {
+      "require_role": "adult",
+      "steward_household_only": true
     }
   },
   "append_only_records": {
@@ -275,7 +305,8 @@
       "parent_blocked_status_values": [
         "acknowledge",
         "dispute",
-        "child_with"
+        "child_with",
+        "note"
       ],
       "write_acl": {
         "require_role": "adult"
@@ -295,6 +326,72 @@
       },
       "value_formats": {
         "day": "date_not_future"
+      }
+    },
+    "custody_notes": {
+      "table": "custody_log",
+      "allowed_columns": [
+        "child_id",
+        "day",
+        "kind",
+        "note"
+      ],
+      "required_columns": [
+        "child_id",
+        "day",
+        "kind",
+        "note"
+      ],
+      "writer_column": "created_by",
+      "created_at_column": "created_at",
+      "write_acl": {
+        "require_role": "adult"
+      },
+      "allowed_values": {
+        "kind": [
+          "note"
+        ]
+      },
+      "value_formats": {
+        "day": "date_not_future"
+      },
+      "max_text_lengths": {
+        "child_id": 120,
+        "day": 10,
+        "kind": 32,
+        "note": 2000
+      }
+    },
+    "journal_photos": {
+      "table": "journal_photos",
+      "allowed_columns": [
+        "entry_id",
+        "child_id",
+        "photo_file_id",
+        "thumb_file_id"
+      ],
+      "required_columns": [
+        "entry_id",
+        "child_id",
+        "photo_file_id"
+      ],
+      "writer_column": "created_by",
+      "created_at_column": "created_at",
+      "parent_table": "custody_log",
+      "parent_fk_column": "entry_id",
+      "parent_status_column": "kind",
+      "parent_blocked_status_values": [
+        "acknowledge"
+      ],
+      "parent_owner_column": "created_by",
+      "write_acl": {
+        "require_role": "adult"
+      },
+      "max_text_lengths": {
+        "entry_id": 64,
+        "child_id": 120,
+        "photo_file_id": 64,
+        "thumb_file_id": 64
       }
     }
   },
@@ -503,6 +600,16 @@
       },
       {
         "column": "parent_b_id",
+        "on_removed": "keep"
+      }
+    ],
+    "journal_photos": [
+      {
+        "column": "created_by",
+        "on_removed": "keep"
+      },
+      {
+        "column": "child_id",
         "on_removed": "keep"
       }
     ]
@@ -817,6 +924,133 @@
     "change_history": true,
     "views": [
       {
+        "id": "agreed_schedule",
+        "title": "Agreed parenting schedule",
+        "description": "The standing rotation agreed for each child, in words, with the parents it names, the exchange time, the dates it is effective between and when it was agreed. A proposal the other parent has not yet signed is listed too, marked as not in force, so a draft can be taken to a lawyer or mediator. Not filtered by date; the history below holds every earlier version.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT child_id AS child, json_object('cycle', cycle, 'anchor_date', anchor_date, 'a', 'Parent A', 'b', 'Parent B') AS rotation, parent_a_id AS parent_a, parent_b_id AS parent_b, exchange_time AS exchange_time, timezone AS timezone, anchor_date AS anchor_date, effective_from AS effective_from, effective_to AS effective_to, agreed_at AS in_force_since, proposed_by AS proposed_by, CASE status WHEN 'agreed' THEN 'Agreed' || CASE WHEN household_a_agreed = 1 AND household_b_agreed = 1 THEN ', signed by both parents' ELSE ', signed by one parent' END || CASE WHEN countersigned_at IS NOT NULL THEN ' (second signature ' || substr(countersigned_at, 1, 10) || ')' ELSE '' END ELSE 'Proposed, not in force' END AS state FROM app_co_parenting__schedule_versions WHERE status IN ('agreed','pending') AND child_id IS NOT NULL ORDER BY child_id, (agreed_at IS NULL), agreed_at"
+        },
+        "columns": [
+          {
+            "key": "child",
+            "label": "Child",
+            "format": "member"
+          },
+          {
+            "key": "rotation",
+            "label": "Standing rotation",
+            "format": "schedule_cycle"
+          },
+          {
+            "key": "parent_a",
+            "label": "Parent A",
+            "format": "member"
+          },
+          {
+            "key": "parent_b",
+            "label": "Parent B",
+            "format": "member"
+          },
+          {
+            "key": "exchange_time",
+            "label": "Exchange time"
+          },
+          {
+            "key": "timezone",
+            "label": "Timezone"
+          },
+          {
+            "key": "anchor_date",
+            "label": "Cycle starts",
+            "format": "date"
+          },
+          {
+            "key": "effective_from",
+            "label": "Effective from",
+            "format": "date"
+          },
+          {
+            "key": "effective_to",
+            "label": "Effective to",
+            "format": "date"
+          },
+          {
+            "key": "in_force_since",
+            "label": "Agreed on",
+            "format": "datetime"
+          },
+          {
+            "key": "proposed_by",
+            "label": "Proposed by",
+            "format": "member"
+          },
+          {
+            "key": "state",
+            "label": "State"
+          }
+        ],
+        "group_by": "child"
+      },
+      {
+        "id": "agreed_holidays",
+        "title": "Agreed holiday schedule",
+        "description": "The holiday rules in force today for each child: when each holiday falls, in words, and which parent has it in even and odd years. A proposal the other parent has not yet signed is listed too, marked as not in force. Not filtered by date; the history below holds every earlier version.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT child_id AS child, COALESCE(value->>'label', 'None: this ends the holiday schedule') AS holiday, value AS falls, CASE value->>'even_years' WHEN 'a' THEN parent_a_id WHEN 'b' THEN parent_b_id END AS even_years, CASE value->>'odd_years' WHEN 'a' THEN parent_a_id WHEN 'b' THEN parent_b_id END AS odd_years, value->>'exchange_time' AS exchange_time, agreed_at AS in_force_since, proposed_by AS proposed_by, rationale AS rationale, CASE status WHEN 'agreed' THEN 'Agreed' || CASE WHEN household_a_agreed = 1 AND household_b_agreed = 1 THEN ', signed by both parents' ELSE ', signed by one parent' END || CASE WHEN countersigned_at IS NOT NULL THEN ' (second signature ' || substr(countersigned_at, 1, 10) || ')' ELSE '' END ELSE 'Proposed, not in force' END AS state FROM app_co_parenting__holiday_versions LEFT JOIN json_each(CASE WHEN json_valid(rules) THEN rules ELSE '[]' END) WHERE status IN ('agreed','pending') AND child_id IS NOT NULL ORDER BY child_id, (agreed_at IS NULL), agreed_at, key"
+        },
+        "columns": [
+          {
+            "key": "child",
+            "label": "Child",
+            "format": "member"
+          },
+          {
+            "key": "holiday",
+            "label": "Holiday"
+          },
+          {
+            "key": "falls",
+            "label": "Falls on",
+            "format": "recurring_rule"
+          },
+          {
+            "key": "even_years",
+            "label": "Even years",
+            "format": "member"
+          },
+          {
+            "key": "odd_years",
+            "label": "Odd years",
+            "format": "member"
+          },
+          {
+            "key": "exchange_time",
+            "label": "Exchange time"
+          },
+          {
+            "key": "in_force_since",
+            "label": "Agreed on",
+            "format": "datetime"
+          },
+          {
+            "key": "proposed_by",
+            "label": "Proposed by",
+            "format": "member"
+          },
+          {
+            "key": "rationale",
+            "label": "Reason"
+          },
+          {
+            "key": "state",
+            "label": "State"
+          }
+        ],
+        "group_by": "child"
+      },
+      {
         "id": "custody_record",
         "title": "Custody record",
         "description": "Which parent each child was with, day by day, including exchanges.",
@@ -1055,8 +1289,8 @@
       },
       {
         "id": "exchange_log",
-        "title": "Exchange log",
-        "description": "What each parent recorded about exchanges — happened as planned, late, or not at all — and where a child actually was on a day that went otherwise. Every entry is one parent's account, stamped by the hub with who gave it and when; the other parent's answer, if any, is its own entry. Nothing here is edited or deleted.",
+        "title": "Exchange log and journal",
+        "description": "What each parent recorded about exchanges — happened as planned, late, or not at all — and where a child actually was on a day that went otherwise. Every entry is one parent's account, stamped by the hub with who gave it and when; the other parent's answer, if any, is its own entry. Nothing here is edited or deleted. Also lists dated journal entries (kind \"note\"), which are not tied to an exchange.",
         "source": {
           "kind": "sql",
           "query": "SELECT COALESCE(r.day, l.day) AS day, COALESCE(r.child_id, l.child_id) AS child, l.kind AS kind, l.actual_time AS actual_time, l.parent_id AS with_parent, l.note AS note, l.created_by AS recorded_by, l.created_at AS recorded_at, r.created_by AS answers, r.kind AS answers_kind, r.created_at AS answers_recorded_at FROM app_co_parenting__custody_log l LEFT JOIN app_co_parenting__custody_log r ON r.id = l.responds_to_id WHERE l.day >= :range_start AND l.day <= :range_end ORDER BY COALESCE(r.day, l.day), COALESCE(r.child_id, l.child_id), l.created_at"
@@ -1214,6 +1448,49 @@
           {
             "key": "state",
             "label": "State"
+          }
+        ]
+      },
+      {
+        "id": "journal_photos",
+        "title": "Journal photos",
+        "description": "Every photo attached to a journal entry, with the entry it documents, who added it and when. The photos themselves are not printed: a report carries no images. Each is named by its file id, which the household export carries the file under, so a photo in the export can be matched to this line.",
+        "source": {
+          "kind": "sql",
+          "query": "SELECT COALESCE(l.day, substr(p.created_at, 1, 10)) AS day, COALESCE(l.child_id, p.child_id) AS child, l.kind AS entry_kind, p.entry_id AS entry_id, p.photo_file_id AS file_id, p.created_by AS added_by, p.created_at AS added_at FROM app_co_parenting__journal_photos p LEFT JOIN app_co_parenting__custody_log l ON l.id = p.entry_id WHERE COALESCE(l.day, substr(p.created_at, 1, 10)) >= :range_start AND COALESCE(l.day, substr(p.created_at, 1, 10)) <= :range_end ORDER BY COALESCE(l.day, substr(p.created_at, 1, 10)), p.created_at"
+        },
+        "columns": [
+          {
+            "key": "day",
+            "label": "Entry date",
+            "format": "date"
+          },
+          {
+            "key": "child",
+            "label": "Child",
+            "format": "member"
+          },
+          {
+            "key": "entry_kind",
+            "label": "Entry"
+          },
+          {
+            "key": "entry_id",
+            "label": "Entry id"
+          },
+          {
+            "key": "file_id",
+            "label": "Photo file id"
+          },
+          {
+            "key": "added_by",
+            "label": "Added by",
+            "format": "member"
+          },
+          {
+            "key": "added_at",
+            "label": "Added",
+            "format": "datetime"
           }
         ]
       }

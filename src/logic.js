@@ -1981,3 +1981,32 @@ export function outcomeUnknown(e) {
 export function storedDiffers(row, fields) {
   return Object.keys(fields).some((k) => String(row?.[k] ?? "") !== String(fields[k] ?? ""));
 }
+
+// ── Journal photos and notes ─────────────────────────────────────────────────
+
+/**
+ * Journal photos grouped by the entry they document: entry id → rows, oldest
+ * first (the order they were added). A photo naming an entry that is not in
+ * the log (one that retention has since removed) is grouped all the same; the
+ * caller shows nothing for an entry it does not have.
+ */
+export function photosByEntry(photos) {
+  const map = new Map();
+  for (const photo of [...(photos || [])].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))) {
+    const list = map.get(photo.entry_id) ?? [];
+    list.push(photo);
+    map.set(photo.entry_id, list);
+  }
+  return map;
+}
+
+/**
+ * The general journal entries — kind "note": a dated account not tied to an
+ * exchange (an injury, a missed call, how the child was) — newest first by the
+ * day they are about, then by when they were written.
+ */
+export function journalNotes(log) {
+  return (log || [])
+    .filter((e) => e.kind === "note")
+    .sort((a, b) => String(b.day).localeCompare(String(a.day)) || String(b.created_at).localeCompare(String(a.created_at)));
+}

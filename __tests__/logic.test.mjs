@@ -2241,3 +2241,37 @@ describe("mergeHolidayVersion", () => {
     expect(mergeHolidayVersion(amendment, { id: "h1", status: "pending", child_id: "kid", rules: null }).rules).toBe("[1]");
   });
 });
+
+// ── Journal photos and notes ─────────────────────────────────────────────────
+import { photosByEntry, journalNotes } from "../src/logic.js";
+
+describe("photosByEntry", () => {
+  it("groups photos under their entry in the order they were added", () => {
+    const photos = [
+      { id: "p2", entry_id: "e1", created_at: "2026-03-02T10:05:00Z" },
+      { id: "p1", entry_id: "e1", created_at: "2026-03-02T10:00:00Z" },
+      { id: "p3", entry_id: "e9", created_at: "2026-03-01T09:00:00Z" },
+    ];
+    const map = photosByEntry(photos);
+    expect(map.get("e1").map((p) => p.id)).toEqual(["p1", "p2"]);
+    // An entry retention has removed still groups its photos; the caller
+    // simply has no entry to show them under.
+    expect(map.get("e9").map((p) => p.id)).toEqual(["p3"]);
+    expect(map.get("none")).toBeUndefined();
+    expect(photosByEntry(null).size).toBe(0);
+  });
+});
+
+describe("journalNotes", () => {
+  it("lists only the general notes, newest day first, then latest written first", () => {
+    const log = [
+      { id: "a", kind: "exchange_late", day: "2026-03-05", created_at: "2026-03-05T18:00:00Z" },
+      { id: "b", kind: "note", day: "2026-03-01", created_at: "2026-03-01T20:00:00Z" },
+      { id: "c", kind: "note", day: "2026-03-04", created_at: "2026-03-04T08:00:00Z" },
+      { id: "d", kind: "note", day: "2026-03-04", created_at: "2026-03-04T21:00:00Z" },
+      { id: "e", kind: "child_with", day: "2026-03-06", created_at: "2026-03-06T08:00:00Z" },
+    ];
+    expect(journalNotes(log).map((e) => e.id)).toEqual(["d", "c", "b"]);
+    expect(journalNotes(undefined)).toEqual([]);
+  });
+});

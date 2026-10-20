@@ -230,7 +230,13 @@ describe("manifest ↔ app agreement", async () => {
   it("keeps the custody journal append-only, adult-read, and retained like the custody record", () => {
     const policy = manifest.row_policies.custody_log;
     expect(policy).toMatchObject({ kind: "endpoint_only", read: "adult", audit_writes: true });
-    expect(manifest.retention.custody_log).toEqual({ default: 400, timestamp_column: "day", tier: "evidentiary" });
+    expect(manifest.retention.custody_log).toMatchObject({ default: 400, timestamp_column: "day", tier: "evidentiary" });
+    // A photo is added after its entry, possibly long after a backdated one, so
+    // its own created_at clock runs later: the entry's expiry takes its photos
+    // (and their bytes) with it rather than leaving them orphaned.
+    expect(manifest.retention.custody_log.dependent_tables).toEqual([
+      { table: "journal_photos", foreign_key: "entry_id", file_id_column: ["photo_file_id", "thumb_file_id"] },
+    ]);
     expect(manifest.retention.custody_days.default).toBe(manifest.retention.custody_log.default);
     const rec = manifest.append_only_records.custody_log;
     expect(rec.write_acl).toEqual({ require_role: "adult" });
@@ -254,9 +260,10 @@ describe("manifest ↔ app agreement", async () => {
       write_acl: { require_role: "adult" },
     });
     expect(answers.allowed_values.kind).toEqual(["acknowledge", "dispute"]);
-    // Only an exchange account is answerable — never an answer, never a fact.
+    // Only an exchange account is answerable — never an answer, never a fact,
+    // and not a journal note until the app draws answers under notes.
     expect(answers.parent_status_column).toBe("kind");
-    expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with"]);
+    expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with", "note"]);
     expect(answers.value_formats).toEqual({ day: "date_not_future" });
     expect(answers.required_columns).toContain("responds_to_id");
     expect(answers.allowed_columns).not.toContain("parent_id");
@@ -334,6 +341,113 @@ describe("manifest ↔ app agreement", async () => {
     expect(config.late_signature).toEqual({ signed_at_column: "countersigned_at" });
     const migration = readFileSync(join(__dirname, "../migrations/010_holiday_schedules.sql"), "utf-8");
     expect(migration).toMatch(/holiday_versions \([^;]*countersigned_at\s+TEXT/);
+  });
+
+  // The reports a parent hands over on their own. The hub puts the signed
+  // day-by-day array and each holiday rule into words; proposals ride along
+  // marked as not in force, so a draft can go to a lawyer before it is signed.
+  // Two reports, not one: a report may read one policy-governed table (the
+  // hub refuses a governed table inside a CTE or subquery, and a top-level
+  // UNION), and the standing schedule and the holidays are two agreements.
+  it("offers the agreed schedule and the agreed holidays as hub-worded reports, per child", () => {
+    expect(manifest.reports.views.slice(0, 2).map((v) => v.id)).toEqual(["agreed_schedule", "agreed_holidays"]);
+    const schedule = manifest.reports.views.find((v) => v.id === "agreed_schedule");
+    const holidays = manifest.reports.views.find((v) => v.id === "agreed_holidays");
+    expect(schedule.columns.find((c) => c.key === "rotation").format).toBe("schedule_cycle");
+    expect(holidays.columns.find((c) => c.key === "falls").format).toBe("recurring_rule");
+    // The rotation column carries the stored array and its anchor for the hub
+    // to word; the array stays a JSON string inside, so an unreadable one is
+    // printed as-is rather than failing the document.
+    expect(schedule.source.query).toContain("json_object('cycle', cycle, 'anchor_date', anchor_date, 'a', 'Parent A', 'b', 'Parent B') AS rotation");
+    expect(schedule.columns.map((c) => c.key)).toEqual(expect.arrayContaining(["effective_from", "effective_to"]));
+    for (const view of [schedule, holidays]) {
+      expect(view.group_by).toBe("child");
+      expect(view.columns.length).toBeLessThanOrEqual(12);
+      const { query } = view.source;
+      expect(query.length).toBeLessThanOrEqual(2000);
+      // In force and proposed, never superseded or declined; the state column
+      // says which, and a proposal is never called in force.
+      // A withdrawn proposal keeps status 'pending' with its snapshot released
+      // (the hub nulls the frozen terms), so a row with no child is not a plan.
+      expect(query).toContain("WHERE status IN ('agreed','pending') AND child_id IS NOT NULL");
+      expect(query).toContain("ELSE 'Proposed, not in force' END AS state");
+      // "Agreed", not "in force": the effective window decides that, and the
+      // schedule view prints it rather than asserting it.
+      expect(query).toContain("WHEN 'agreed' THEN 'Agreed' ||");
+      // Not range-filtered: it shows what is in force on the day it is printed.
+      expect(query).not.toContain(":range_start");
+      // Grouped by child, so the child leads the sort (the hub requires it);
+      // proposals (no agreed_at) sort last within each child.
+      expect(query).toMatch(/ORDER BY child_id, \(agreed_at IS NULL\), agreed_at/);
+    }
+  });
+
+  // Photos on the journal: one append-only row per photo, naming the entry it
+  // documents, readable by every adult in the space and deletable by nobody.
+  describe("journal photos", () => {
+    it("keeps each photo as an append-only row that names its entry", () => {
+      const rec = manifest.append_only_records.journal_photos;
+      expect(rec.table).toBe("journal_photos");
+      expect(rec.parent_table).toBe("custody_log");
+      expect(rec.parent_fk_column).toBe("entry_id");
+      // A photo documents an account — an exchange, where the child was, a
+      // note, or a dispute — never a bare acknowledgement; and only its own
+      // author's: the hub refuses a photo on the other parent's testimony.
+      expect(rec.parent_blocked_status_values).toEqual(["acknowledge"]);
+      expect(rec.parent_owner_column).toBe("created_by");
+      expect(rec.required_columns).toEqual(["entry_id", "child_id", "photo_file_id"]);
+      expect(rec.write_acl).toEqual({ require_role: "adult" });
+      expect(manifest.row_policies.journal_photos).toEqual({ kind: "endpoint_only", read: "adult", audit_writes: true });
+    });
+
+    it("declares both file columns, and lets the photos (thumbnails with them) expire with their entry", () => {
+      expect(manifest.file_columns.journal_photos).toEqual({ columns: ["photo_file_id", "thumb_file_id"] });
+      // No clock of their own: a household that keeps the custody record longer
+      // (ahead of a court date) keeps its photos exactly as long.
+      expect(manifest.retention.journal_photos).toBeUndefined();
+      expect(manifest.retention.custody_log.dependent_tables).toEqual([
+        { table: "journal_photos", foreign_key: "entry_id", file_id_column: ["photo_file_id", "thumb_file_id"] },
+      ]);
+      const migration = readFileSync(join(__dirname, "../migrations/011_journal_photos.sql"), "utf-8");
+      // The cascade selects and deletes by entry_id.
+      expect(migration).toMatch(/CREATE INDEX IF NOT EXISTS app_co_parenting__journal_photos_entry_idx\s+ON app_co_parenting__journal_photos \(entry_id, created_at\)/);
+      expect(migration).not.toMatch(/CHECK\s*\(/);
+    });
+
+    it("opens the bytes to every adult in the space and to nobody else, and lets no one delete them", () => {
+      // Children can read nothing of the journal; a supporting adult who can
+      // read the entry can see its photo. The default would hand the bytes to
+      // a child; uploader_only would hide them from the other parent.
+      expect(manifest.file_acls).toEqual({ read: "adults", write: { require_role: "adult", steward_household_only: true } });
+    });
+
+    it("lists every photo in a report by file id, since a report carries no images", () => {
+      const view = manifest.reports.views.find((v) => v.id === "journal_photos");
+      expect(view.columns.map((c) => c.key)).toEqual(["day", "child", "entry_kind", "entry_id", "file_id", "added_by", "added_at"]);
+      expect(view.source.query).toContain("LEFT JOIN app_co_parenting__custody_log l ON l.id = p.entry_id");
+      // The entry may have expired before its photo: the photo row names the child too.
+      expect(view.source.query).toContain("COALESCE(l.child_id, p.child_id) AS child");
+      // Ranged on the DAY the entry is about, so a photo added later than the
+      // day it documents lands in the same document as its entry.
+      expect(view.source.query).toContain("COALESCE(l.day, substr(p.created_at, 1, 10)) >= :range_start");
+      expect(manifest.reports.views.length).toBeLessThanOrEqual(12);
+    });
+  });
+
+  // A dated entry not tied to an exchange, through its own record over the
+  // journal table: a note needs words, and the kind is fixed.
+  it("takes a general journal note as testimony on the same journal", () => {
+    const rec = manifest.append_only_records.custody_notes;
+    expect(rec.table).toBe("custody_log");
+    expect(rec.allowed_values).toEqual({ kind: ["note"] });
+    expect(rec.required_columns).toEqual(["child_id", "day", "kind", "note"]);
+    expect(rec.value_formats).toEqual({ day: "date_not_future" });
+    // Closed to answers for now: the app draws answers under exchange rows
+    // only, and an answer nobody can see is worse than none. Open it when the
+    // Journal card renders them.
+    expect(manifest.append_only_records.custody_answers.parent_blocked_status_values).toContain("note");
+    // Notes print in the exchange log, which says so in its title.
+    expect(manifest.reports.views.find((v) => v.id === "exchange_log").title).toBe("Exchange log and journal");
   });
 
   // The record a court is handed names each holiday in words, not as JSON.
