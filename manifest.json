@@ -2,7 +2,7 @@
   "id": "co-parenting",
   "name": "Co-Parenting",
   "version": "1.7.0",
-  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are. Holiday schedules alternate by year; an exchange journal with photos records how each handoff went; and the agreed schedule prints in words as a PDF or verified copy, as does the whole record.",
+  "description": "Shared custody coordination for split households — per-child standing schedules (alternating weeks, 2-2-3, alternating weekends, 2-2-5-5, 3-4-4-3, or your own cycle) that take effect only when both parents countersign once both have joined (one set up before the other parent joins is in force on one signature and recorded that way), countersigned one-off swaps whose terms are frozen server-side at approval, and handoff notes. Every agreed version is kept; custody days are worked out on the server from what was agreed and flow to the household Calendar, so kids always know where they are. Holiday schedules alternate by year; each parent checks in at an exchange with the hub's own time on it, and an exchange journal with photos records how each handoff went; and the agreed schedule prints in words as a PDF or verified copy, as does the whole record.",
   "entrypoint": "index.html",
   "runtime": "static",
   "category": "family",
@@ -215,7 +215,8 @@
         "day",
         "kind",
         "actual_time",
-        "note"
+        "note",
+        "exchange_id"
       ],
       "required_columns": [
         "child_id",
@@ -243,7 +244,41 @@
         "day": 10,
         "kind": 32,
         "actual_time": 5,
-        "note": 2000
+        "note": 2000,
+        "exchange_id": 64
+      }
+    },
+    "custody_checkins": {
+      "table": "custody_log",
+      "allowed_columns": [
+        "child_id",
+        "day",
+        "kind",
+        "exchange_id"
+      ],
+      "required_columns": [
+        "child_id",
+        "day",
+        "kind"
+      ],
+      "writer_column": "created_by",
+      "created_at_column": "created_at",
+      "write_acl": {
+        "require_role": "adult"
+      },
+      "allowed_values": {
+        "kind": [
+          "exchange_checkin"
+        ]
+      },
+      "value_formats": {
+        "day": "date_not_future"
+      },
+      "max_text_lengths": {
+        "child_id": 120,
+        "day": 10,
+        "kind": 32,
+        "exchange_id": 64
       }
     },
     "custody_facts": {
@@ -289,7 +324,8 @@
         "day",
         "kind",
         "responds_to_id",
-        "note"
+        "note",
+        "exchange_id"
       ],
       "required_columns": [
         "child_id",
@@ -306,7 +342,8 @@
         "acknowledge",
         "dispute",
         "child_with",
-        "note"
+        "note",
+        "exchange_checkin"
       ],
       "write_acl": {
         "require_role": "adult"
@@ -322,7 +359,8 @@
         "day": 10,
         "kind": 32,
         "responds_to_id": 64,
-        "note": 2000
+        "note": 2000,
+        "exchange_id": 64
       },
       "value_formats": {
         "day": "date_not_future"
@@ -381,7 +419,8 @@
       "parent_fk_column": "entry_id",
       "parent_status_column": "kind",
       "parent_blocked_status_values": [
-        "acknowledge"
+        "acknowledge",
+        "exchange_checkin"
       ],
       "parent_owner_column": "created_by",
       "write_acl": {
@@ -1290,10 +1329,10 @@
       {
         "id": "exchange_log",
         "title": "Exchange log and journal",
-        "description": "What each parent recorded about exchanges — happened as planned, late, or not at all — and where a child actually was on a day that went otherwise. Every entry is one parent's account, stamped by the hub with who gave it and when; the other parent's answer, if any, is its own entry. Nothing here is edited or deleted. Also lists dated journal entries (kind \"note\"), which are not tied to an exchange.",
+        "description": "What each parent recorded about exchanges — a check-in at the exchange (exchange_checkin), whose time is when the hub received it, not a time anyone typed, printed beside the agreed exchange time for that day; or an account of it as happened as planned, late, or not at all — and where a child actually was on a day that went otherwise. Every entry is one parent's account, stamped by the hub with who gave it and when; the other parent's answer, if any, is its own entry. Nothing here is edited or deleted. Also lists dated journal entries (kind \"note\"), which are not tied to an exchange.",
         "source": {
           "kind": "sql",
-          "query": "SELECT COALESCE(r.day, l.day) AS day, COALESCE(r.child_id, l.child_id) AS child, l.kind AS kind, l.actual_time AS actual_time, l.parent_id AS with_parent, l.note AS note, l.created_by AS recorded_by, l.created_at AS recorded_at, r.created_by AS answers, r.kind AS answers_kind, r.created_at AS answers_recorded_at FROM app_co_parenting__custody_log l LEFT JOIN app_co_parenting__custody_log r ON r.id = l.responds_to_id WHERE l.day >= :range_start AND l.day <= :range_end ORDER BY COALESCE(r.day, l.day), COALESCE(r.child_id, l.child_id), l.created_at"
+          "query": "SELECT COALESCE(r.day, l.day) AS day, COALESCE(r.child_id, l.child_id) AS child, l.kind AS kind, l.actual_time AS actual_time, l.parent_id AS with_parent, l.note AS note, l.created_by AS recorded_by, l.created_at AS recorded_at, d.exchange_time AS agreed_time, r.created_by AS answers, r.kind AS answers_kind, r.created_at AS answers_recorded_at FROM app_co_parenting__custody_log l LEFT JOIN app_co_parenting__custody_log r ON r.id = l.responds_to_id LEFT JOIN app_co_parenting__custody_days d ON d.child_id = l.child_id AND d.day = l.day WHERE l.day >= :range_start AND l.day <= :range_end ORDER BY COALESCE(r.day, l.day), COALESCE(r.child_id, l.child_id), l.created_at"
         },
         "columns": [
           {
@@ -1332,6 +1371,10 @@
             "key": "recorded_at",
             "label": "Recorded",
             "format": "datetime"
+          },
+          {
+            "key": "agreed_time",
+            "label": "Agreed exchange time"
           },
           {
             "key": "answers",

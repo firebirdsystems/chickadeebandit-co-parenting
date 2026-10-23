@@ -607,12 +607,6 @@
           "as": "parent"
         },
         {
-          "action": "fill",
-          "selector": "#f-time",
-          "value": "17:00",
-          "as": "parent"
-        },
-        {
           "action": "click",
           "selector": "#save-sch",
           "as": "parent"
@@ -644,22 +638,48 @@
         },
         {
           "action": "click",
-          "selector": "[data-testid=\"exchange-record\"] [data-outcome$=\"exchange_as_planned\"]",
+          "selector": "[data-testid=\"exchange-checkin\"]",
           "as": "parent"
         },
         {
           "action": "waitFor",
-          "selector": "[data-testid=\"exchange-correct\"]",
+          "selector": "[data-testid=\"checkin\"]",
+          "as": "parent"
+        },
+        {
+          "action": "expectText",
+          "text": "checked in at",
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-testid=\"exchange-checkin\"]",
+          "count": 0,
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "[data-testid=\"exchange-record\"]",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "#save-outcome",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "#save-outcome",
+          "as": "parent"
+        },
+        {
+          "action": "waitFor",
+          "selector": "[data-entry]",
           "as": "parent"
         },
         {
           "action": "expectText",
           "text": "Happened as planned",
-          "as": "parent"
-        },
-        {
-          "action": "expectText",
-          "text": "Correct your account:",
           "as": "parent"
         },
         {
@@ -669,12 +689,17 @@
         },
         {
           "action": "click",
-          "selector": "[data-testid=\"exchange-correct\"] [data-outcome$=\"exchange_missed\"]",
+          "selector": "[data-testid=\"exchange-record\"]",
           "as": "parent"
         },
         {
           "action": "waitFor",
           "selector": "#save-outcome",
+          "as": "parent"
+        },
+        {
+          "action": "click",
+          "selector": "input[name=\"o-kind\"][value=\"exchange_missed\"]",
           "as": "parent"
         },
         {
@@ -690,7 +715,7 @@
         },
         {
           "action": "waitFor",
-          "selector": "[data-testid=\"exchange-correct\"]",
+          "selector": "[data-entry] .note-cat",
           "as": "parent"
         },
         {
@@ -725,13 +750,25 @@
         },
         {
           "action": "waitFor",
-          "selector": "[data-testid=\"exchange-correct\"]",
+          "selector": "[data-testid=\"checkin\"]",
           "as": "parent"
         },
         {
           "action": "expectCount",
           "selector": "[data-entry]",
           "count": 2,
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-testid=\"checkin\"]",
+          "count": 1,
+          "as": "parent"
+        },
+        {
+          "action": "expectCount",
+          "selector": "[data-testid=\"exchange-checkin\"]",
+          "count": 0,
           "as": "parent"
         },
         {

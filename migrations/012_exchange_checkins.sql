@@ -1,0 +1,21 @@
+-- One exchange, several children, and a check-in at it.
+--
+-- Children who change homes together — same day, same two parents, same time —
+-- are one exchange, and the app records them together. The journal stays one
+-- row per child (the reports and the custody record are per child), and the
+-- rows written together for one exchange share an `exchange_id`, so the app
+-- can show them as the one account they are: one check-in, one outcome, one
+-- answer, rather than the same words once per child.
+--
+-- NULL on every row written before this, and on journal notes and "where the
+-- child was" facts, which are written one child at a time. Every row written
+-- from an exchange carries one, a single child's included. It groups only for
+-- display; nothing is derived from it.
+--
+-- A check-in (`kind = 'exchange_checkin'`, the `custody_checkins` record) has
+-- no time column of its own: the time it was made is `created_at`, which the
+-- hub stamps. That is the point of it. A time a parent types is their word; a
+-- check-in is the hub saying when it heard from them.
+--
+-- Plaintext by its `_id` suffix: a random id, read to group rows.
+ALTER TABLE app_co_parenting__custody_log ADD COLUMN exchange_id TEXT;

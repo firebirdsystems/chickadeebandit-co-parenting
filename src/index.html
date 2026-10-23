@@ -163,6 +163,8 @@
       SWAP_HORIZON_DAYS, swapIsStalled, swapStallReason, swapPartyIssue,
       versionSignatures, unilateralStance, scheduleSnapshot, childrenOpenForNewSchedule, timeZoneChoices, timeZoneDefaultSource,
       fmtHandoffDay as fmtHandoffDayFrom, fmtExchangeTime,
+      CHECKIN_KIND, groupExchanges, transitionTimeZone, exchangeCheckins, collapseByExchange, localDateTime, minutesFromAgreed,
+      describeArrival, joinPhrases,
       failureLine, agreementRowState, agreementFailureLine, outcomeUnknown, storedDiffers,
     } from "./logic.js";
 
@@ -1861,17 +1863,59 @@
     const CATEGORIES = ["health", "school", "mood", "items", "general"];
     function renderHandoffs(el) {
       if (!canManage()) { el.innerHTML = `<div class="empty">Handoff notes are shared between the parents.</div>`; return; }
+      const today = todayStr();
+
+      // The exchanges a parent acts on, each one card however many children
+      // change homes in it (see groupExchanges): the coming week's, where a
+      // note for the handoff is written; and today's and the last two weeks',
+      // where a parent checks in or records what happened. Each account is one
+      // parent's; the other parent answers it rather than editing it.
+      // The next two, however far off: a note for the handoff is written from
+      // its card, so there is always one to write it from.
+      const coming = groupExchanges(upcomingTransitions(custodyDays, addDays(today, 1), { limit: 40 }), transitionZone).slice(0, 2);
+      const recent = groupExchanges(recentTransitions(custodyDays, today), transitionZone);
+      shownExchanges = [...coming, ...recent];
+      // The handoffs whose notes a card draws (every card not yet past), so the
+      // list below the cards does not draw them again.
+      const now = new Date().toISOString();
+      const timing = new Map(shownExchanges.map(g => [g, exchangeTiming(g, today, now)]));
+      const notesOnCards = new Set(shownExchanges.filter(g => !timing.get(g).isPast)
+        .flatMap(g => g.child_ids.map(c => `${c}|${g.day}`)));
+
+      const comingHtml = coming.length ? `
+        <div class="card" data-testid="coming-exchanges">
+          <div class="spread" style="margin-bottom:8px">
+            <strong>Coming up</strong>
+            <span class="muted">Notes for the handoff — meds, school, mood, items to pack</span>
+          </div>
+          ${coming.map(g => exchangeCard(g, today, timing.get(g))).join("")}
+        </div>` : `
+        <div class="card" data-testid="coming-exchanges">
+          <div class="spread">
+            <div><strong>Coming up</strong> <span class="muted">No exchange in the schedule ahead</span></div>
+            <button class="btn btn-sm" data-addfor="${childIds().length === 1 ? esc(childIds()[0]) : ""}|">Write a handoff note</button>
+          </div>
+        </div>`;
+      const recentHtml = recent.length ? `
+        <div class="card" data-testid="recent-exchanges">
+          <div class="spread" style="margin-bottom:8px">
+            <strong>Exchanges</strong>
+            <span class="muted">What actually happened</span>
+          </div>
+          ${recent.map(g => exchangeCard(g, today, timing.get(g))).join("")}
+        </div>` : "";
 
       // Notes are grouped under the exchange they were written for. The
       // association is derived by date (see groupNotesByTransition) — notes
       // that match no transition still appear, under "Other notes", because an
-      // append-only record must never become invisible.
+      // append-only record must never become invisible. Those already on an
+      // exchange card above are not drawn twice.
       // The loaded window reaches six weeks back; a note older than that needs
       // its handoff fetched before it can be filed under it.
       ensureOlderTransitions();
-      const { groups, unanchored } = groupNotesByTransition(handoffs, [...olderTransitions, ...custodyDays], todayStr());
+      const { groups, unanchored } = groupNotesByTransition(handoffs, [...olderTransitions, ...custodyDays], today);
 
-      const groupHtml = groups.map(g => `
+      const groupHtml = groups.filter(g => !notesOnCards.has(`${g.transition.child_id}|${g.transition.day}`)).map(g => `
         <div class="card">
           <div class="spread" style="margin-bottom:8px">
             <div>
@@ -1881,20 +1925,8 @@
             <span class="badge ${g.isUpcoming ? "b-pending" : "b-cancelled"}">${g.isUpcoming ? "Upcoming" : "Past"}</span>
           </div>
           ${g.notes.map(h => noteRow(h)).join("")}
-          ${g.isUpcoming ? `<div style="margin-top:10px"><button class="btn btn-sm" data-addfor="${esc(g.transition.child_id)}|${esc(g.transition.day)}">+ Add another note</button></div>` : ""}
+          ${g.isUpcoming ? `<div style="margin-top:10px"><button class="btn btn-sm" data-addfor="${esc(g.transition.child_id)}|${esc(g.transition.day)}">Note for this handoff</button></div>` : ""}
         </div>`).join("");
-
-      // What happened at the exchanges of the last two weeks. Each is one
-      // parent's account; the other parent answers it rather than editing it.
-      const recent = recentTransitions(custodyDays, todayStr());
-      const recentHtml = recent.length ? `
-        <div class="card" data-testid="recent-exchanges">
-          <div class="spread" style="margin-bottom:8px">
-            <strong>Recent exchanges</strong>
-            <span class="muted">What actually happened</span>
-          </div>
-          ${recent.map(t => exchangeRow(t)).join("")}
-        </div>` : "";
 
       const otherHtml = unanchored.length ? `
         <div class="card">
@@ -1911,12 +1943,14 @@
       // The latest few, like the exchanges beside them; the rest open on
       // request (and are always in the record).
       const notes = journalNotesExpanded ? allNotes : allNotes.slice(0, JOURNAL_NOTES_SHOWN);
-      const journalHtml = allNotes.length ? `
+      // Always drawn: "Record what happened" lives here, beside what has been.
+      const journalHtml = `
         <div class="card" data-testid="journal-notes">
           <div class="spread" style="margin-bottom:8px">
-            <strong>Journal</strong>
-            <span class="muted">Dated entries on the record</span>
+            <div><strong>Journal</strong> <span class="muted">Dated entries on the record</span></div>
+            <button class="btn btn-sm" data-newjournal>Record what happened</button>
           </div>
+          ${allNotes.length ? "" : `<p class="muted" style="margin:0">An injury, a missed call, how a child was — written down on the day, and kept.</p>`}
           ${notes.map(e => `
           <div data-testid="journal-note" data-entry="${esc(e.id)}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
             <div class="spread"><strong>${esc(memberName(e.child_id))}</strong><span class="muted">${esc(fmtHandoffDay(e.day))}</span></div>
@@ -1925,36 +1959,34 @@
             ${photoStrip(e, e.created_by === me?.id)}
           </div>`).join("")}
           ${allNotes.length > notes.length ? `<div style="margin-top:8px"><button class="btn btn-sm" data-morenotes>Show all ${allNotes.length} entries</button></div>` : ""}
-        </div>` : "";
+        </div>`;
 
-      const body = recentHtml + journalHtml + ((groups.length || unanchored.length)
-        ? groupHtml + otherHtml
-        : `<div class="empty"><div>${chickadee("nest", { size: 72 })}</div>No handoff notes yet.<br><span class="muted">Write one ahead of the next exchange — meds, school, mood, items to pack.</span></div>`);
+      // Each note is written from where it belongs — a note for a handoff from
+      // that handoff's card, an account of what happened from the Journal — so
+      // the tab has no buttons of its own.
+      const body = comingHtml + recentHtml + journalHtml + groupHtml + otherHtml;
 
-      el.innerHTML = `
-        <div class="spread" style="margin-bottom:12px">
-          <span class="muted">Notes for an exchange — meds, school, mood, items to pack.</span>
-          ${childIds().length ? `<span><button class="btn btn-sm" data-newjournal>+ Journal entry</button> <button class="btn btn-primary btn-sm" data-newnote>+ Add note</button></span>` : ""}
-        </div>
-        ${childIds().length ? body : `<div class="empty">Add a custody schedule in Setup first.</div>`}`;
+      el.innerHTML = childIds().length ? body : `<div class="empty">Add a custody schedule in Setup first.</div>`;
 
-      el.querySelector("[data-newnote]")?.addEventListener("click", () => openHandoffModal());
       el.querySelectorAll("[data-addfor]").forEach(b => b.addEventListener("click", () => {
         const [child_id, day] = b.dataset.addfor.split("|");
         openHandoffModal({ child_id, day });
       }));
-      el.querySelectorAll("[data-outcome]").forEach(b => b.addEventListener("click", () => {
-        const [child_id, day, kind] = b.dataset.outcome.split("|");
-        const t = recent.find(r => r.child_id === child_id && r.day === day);
-        if (kind === "exchange_as_planned") saveLogEntry({ child_id, day, kind }, b, "Happened as planned");
-        else openOutcomeModal(t, kind);
+      el.querySelectorAll("[data-checkin]").forEach(b => b.addEventListener("click", () => {
+        const g = shownExchanges[Number(b.dataset.checkin)];
+        if (g) checkIn(g, b);
+      }));
+      el.querySelectorAll("[data-record-outcome]").forEach(b => b.addEventListener("click", () => {
+        const g = shownExchanges[Number(b.dataset.recordOutcome)];
+        if (g) openOutcomeModal(g);
       }));
       el.querySelectorAll("[data-answer]").forEach(b => b.addEventListener("click", () => {
-        const [entryId, kind] = b.dataset.answer.split("|");
-        const entry = custodyLog.find(e => e.id === entryId);
-        if (!entry) return;
-        if (kind === "acknowledge") saveLogEntry({ child_id: entry.child_id, day: entry.day, kind, responds_to_id: entry.id }, b, "Acknowledge");
-        else openResponseModal(entry);
+        const [ids, kind] = b.dataset.answer.split("|");
+        const rows = ids.split(",").map(id => custodyLog.find(e => e.id === id)).filter(Boolean);
+        if (!rows.length) return;
+        if (kind === "acknowledge") {
+          saveLogEntries(rows.map(r => ({ child_id: r.child_id, day: r.day, kind, responds_to_id: r.id })), b, "Acknowledge", [], { together: true });
+        } else openResponseModal(rows);
       }));
       el.querySelector("[data-newjournal]")?.addEventListener("click", () => openJournalModal());
       el.querySelector("[data-morenotes]")?.addEventListener("click", () => { journalNotesExpanded = true; render(); });
@@ -2068,7 +2100,7 @@
       const kids = childIds();
       const today = todayStr();
       openModal(`
-        <h3>Journal entry</h3>
+        <h3>Record what happened</h3>
         <p class="muted">A dated entry on the record — an injury, a missed call, how ${kids.length === 1 ? esc(memberName(kids[0])) : "the child"} was. It cannot be edited or deleted; a correction is another entry.</p>
         ${kids.length > 1 ? `<label class="field"><span>Child</span><select id="j-child">${kids.map(id => `<option value="${esc(id)}">${esc(memberName(id))}</option>`).join("")}</select></label>` : ""}
         <label class="field"><span>Date</span><input type="date" id="j-day" value="${esc(today)}" max="${esc(today)}"></label>
@@ -2094,53 +2126,223 @@
       exchange_late: "Late",
       exchange_missed: "Didn't happen",
       disputed: "Disputed",
+      mixed: "Differs by child",
+      partial: "Not recorded for every child",
     };
 
-    function exchangeRow(t) {
-      const o = exchangeOutcome(custodyLog, t.child_id, t.day);
-      const when = `${esc(fmtHandoffDay(t.day, todayStr()))}${t.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(t))}` : ""}`;
-      // The journal is append-only, so a mistake is corrected by appending: a
-      // parent's LATEST account is the one that stands, and their latest answer
-      // to the other parent's standing account is the one that counts. The
-      // controls therefore never go away — they change from "record" to
-      // "correct" — and an entry that has been replaced says so.
-      const standingIds = new Set(o.standing.map(e => e.id));
-      const myStanding = o.standing.find(e => e.created_by === me?.id) ?? null;
-      const head = `
-        <div class="spread">
-          <div><strong>${esc(t.title)}</strong><div class="muted">${when}</div></div>
-          ${o.state === "unrecorded" ? "" : `<span class="badge ${o.state === "disputed" ? "b-pending" : o.state === "exchange_as_planned" ? "b-locked" : "b-cancelled"}">${esc(OUTCOME_LABEL[o.state] ?? o.state)}</span>`}
-        </div>`;
-      const entries = o.entries.map(e => {
-        const answered = o.responses.filter(r => r.responds_to_id === e.id);
+    /** The exchanges the Handoffs tab drew, by position: its buttons name one
+     *  by index (a key holds characters an attribute cannot carry). */
+    let shownExchanges = [];
+
+    /** This device's timezone, or null where Intl will not say. */
+    function deviceTimeZone() {
+      try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; }
+    }
+    const DEVICE_ZONE = deviceTimeZone();
+
+    /** "Emma and Leo → Dad", or the transition's own title for one child. */
+    function exchangeTitle(g) {
+      return g.child_ids.length > 1 ? `${namesOf(g.child_ids)} → ${memberName(g.parent_id)}` : g.transitions[0].title;
+    }
+
+    /** "Emma", "Emma and Leo", "Emma, Leo and Sam". */
+    function namesOf(ids) {
+      return joinPhrases(ids.map(memberName));
+    }
+
+    /** The row of an account (one row per child) its photos hang on: the one
+     *  that has them, else the first sent — which saveLogEntries gives them. */
+    function photoRow(rows) {
+      photoMap ??= photosByEntry(journalPhotos);
+      return rows.find(r => photoMap.get(r.id)?.length)
+        ?? [...rows].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0];
+    }
+
+    /** The timezone the schedule now in force for a child is kept in. */
+    function scheduleZone(childId) {
+      return agreedVersion(versions, childId)?.timezone || spaceTimeZone;
+    }
+    /** The timezone a custody day's agreed time is on: the version that
+     *  produced it, so a later amendment to another zone cannot move an
+     *  earlier exchange's clock; the schedule now in force for a day that
+     *  names no version this view holds. */
+    function transitionZone(t) {
+      return transitionTimeZone(t, versions, spaceTimeZone) ?? scheduleZone(t.child_id);
+    }
+    /** An exchange's zone: its children share one (groupExchanges keys on it). */
+    function exchangeZone(g) {
+      return g.zone || transitionZone(g.transitions[0]);
+    }
+
+    /** "5:19 PM", or "Sat 9:02 AM" when the instant fell on another day — on
+     *  the schedule's clock, which the agreed time is on, and named when this
+     *  device keeps another. */
+    function fmtStamp(iso, g, zone) {
+      const local = localDateTime(iso, zone);
+      if (!local) return "";
+      const at = local.date === g.day ? fmtExchangeTime(local.hhmm) : `${fmtHandoffDay(local.date, todayStr())} ${fmtExchangeTime(local.hhmm)}`;
+      return DEVICE_ZONE && DEVICE_ZONE !== zone ? `${at} (${zone})` : at;
+    }
+
+    /**
+     * Where an exchange stands in time. `live` is its own day, counted on the
+     * schedule's clock as its custody days are — a schedule kept in another
+     * zone than the household is still "today" there after the household's
+     * midnight — and never later than the household's today, which the hub
+     * always accepts (it refuses a day in the household's future).
+     */
+    function exchangeTiming(g, today, now = new Date().toISOString()) {
+      const zone = exchangeZone(g);
+      // Coming, today or past on the schedule's own clock — the household's
+      // may be another zone (or the unset UTC default) and a date ahead or
+      // behind. A late-evening exchange stays open past midnight while a
+      // check-in still measures against its agreed time (minutesFromAgreed).
+      const zoneDay = localDateTime(now, zone)?.date ?? today;
+      const live = g.day <= today && (g.day === zoneDay || minutesFromAgreed(now, g.day, g.exchange_time, zone) !== null);
+      return {
+        zone, live,
+        isFuture: g.day > zoneDay && !live,
+        isToday: g.day === zoneDay || live,
+        isPast: g.day < zoneDay && !live,
+      };
+    }
+
+    /**
+     * One exchange: the children who change homes together, as one card.
+     *
+     *   coming   its notes, and "Note for this handoff"
+     *   today    its notes, the check-in, the check-ins made, and the
+     *            accounts recorded
+     *   past     the check-ins made and the accounts recorded
+     *
+     * A check-in carries the hub's time; an account recorded by hand
+     * ("Record the outcome…") carries the time a parent typed, and says when
+     * it was recorded if that was another day.
+     */
+    function exchangeCard(g, today, timing) {
+      const index = shownExchanges.indexOf(g);
+      const { zone, live, isFuture, isToday, isPast } = timing;
+      const several = g.child_ids.length > 1;
+      const first = g.transitions[0];
+      const title = exchangeTitle(g);
+      const when = `${esc(fmtHandoffDay(g.day, today))}${first.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(first))}` : ""}`;
+
+      const checkins = isFuture ? [] : exchangeCheckins(custodyLog, g);
+      // Offered on the exchange's day while any child of it lacks this adult's
+      // check-in (a child may join the exchange after the check-in was made).
+      const offerCheckin = live && !!me && uncheckedChildren(g, checkins).length > 0;
+      // The handoff's notes, the things to hand over among them, where both
+      // parents see them at the exchange.
+      const notes = isPast ? [] : g.child_ids.flatMap(cid => notesForTransition(handoffs, cid, g.day));
+      const notesHtml = notes.map(h => noteRow(h)).join("");
+
+      const checkinsHtml = checkins.map(c => {
+        const arrival = describeArrival(minutesFromAgreed(c.created_at, g.day, g.exchange_time, zone));
+        const only = several && c.child_ids.length < g.child_ids.length ? ` for ${esc(namesOf(c.child_ids))}` : "";
+        return `<div class="muted" style="margin-top:6px" data-testid="checkin">${esc(memberName(c.created_by))} checked in${only} at <b>${esc(fmtStamp(c.created_at, g, zone))}</b>${arrival ? ` · ${esc(arrival)}` : ""}</div>`;
+      }).join("");
+
+      // What the journal says, child by child, drawn as the accounts given:
+      // rows written together for the children of this exchange are one line.
+      const outcomes = isFuture ? [] : g.child_ids.map(cid => exchangeOutcome(custodyLog, cid, g.day));
+      // A child nobody has recorded yet disagrees with no one.
+      const states = new Set(outcomes.map(o => o.state).filter(st => st !== "unrecorded"));
+      // A dispute on any child's exchange is the card's state; otherwise the
+      // children's states agree, or the card says they differ.
+      // And one recorded for only some of its children says that, rather than
+      // speaking for the ones nobody recorded.
+      const someUnrecorded = outcomes.some(o => o.state === "unrecorded");
+      const state = states.has("disputed") ? "disputed" : states.size > 1 ? "mixed"
+        : states.size === 0 ? "unrecorded" : someUnrecorded ? "partial" : [...states][0];
+      const standingIds = new Set(outcomes.flatMap(o => o.standing.map(e => e.id)));
+      const responses = outcomes.flatMap(o => o.responses);
+      const current = outcomes.flatMap(o => o.current);
+      const entries = outcomes.flatMap(o => o.entries)
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      const accountsHtml = collapseByExchange(entries).map(a => {
+        const e = a.entry, ids = a.rows.map(r => r.id);
         const mine = e.created_by === me?.id;
-        const stands = standingIds.has(e.id);
-        // My answer that currently counts against this entry, if any.
-        const myAnswer = o.current.find(r => r.created_by === me?.id && r.responds_to_id === e.id) ?? null;
+        const stands = a.rows.some(r => standingIds.has(r.id));
+        // Replaced for some of its children only: said, for those.
+        const replacedFor = stands ? a.rows.filter(r => !standingIds.has(r.id)).map(r => r.child_id) : [];
+        const answered = collapseByExchange(responses.filter(r => ids.includes(r.responds_to_id)));
+        // My answer that currently counts against this account, if any; and
+        // per kind, the rows (children) it does not yet cover — an answer
+        // that stopped part way is finished by the same button.
+        const myAnswer = current.find(r => r.created_by === me?.id && ids.includes(r.responds_to_id)) ?? null;
+        // Only rows still standing: an answer to a replaced row settles nothing,
+        // so offering it would offer the same button forever.
+        const uncovered = kind => ids.filter(id => standingIds.has(id) && !current.some(r => r.created_by === me?.id && r.responds_to_id === id && r.kind === kind));
+        const ackIds = uncovered("acknowledge"), disputeIds = uncovered("dispute");
+        const instead = kind => myAnswer && myAnswer.kind !== kind;
+        const only = several && a.child_ids.length < g.child_ids.length ? ` (${esc(namesOf(a.child_ids))})` : "";
+        const recorded = localDateTime(e.created_at, zone);
+        const later = recorded && recorded.date !== g.day ? ` · recorded ${esc(fmtHandoffDay(recorded.date, today))}` : "";
         const answerButtons = mine || !stands ? "" : `
               <div style="margin:4px 0 0 12px">
-                ${myAnswer?.kind === "acknowledge" ? "" : `<button class="btn btn-sm" data-answer="${esc(e.id)}|acknowledge">${myAnswer ? "Acknowledge instead" : "Acknowledge"}</button>`}
-                ${myAnswer?.kind === "dispute" ? "" : `<button class="btn btn-sm" data-answer="${esc(e.id)}|dispute">${myAnswer ? "Dispute instead…" : "Dispute…"}</button>`}
+                ${ackIds.length ? `<button class="btn btn-sm" data-answer="${esc(ackIds.join(","))}|acknowledge">${instead("acknowledge") ? "Acknowledge instead" : "Acknowledge"}</button>` : ""}
+                ${disputeIds.length ? `<button class="btn btn-sm" data-answer="${esc(disputeIds.join(","))}|dispute">${instead("dispute") ? "Dispute instead…" : "Dispute…"}</button>` : ""}
               </div>`;
         return `
           <div class="muted" style="margin-top:6px${stands ? "" : ";opacity:.7"}" data-entry="${esc(e.id)}">
-            ${esc(memberName(e.created_by))}: <b>${esc(OUTCOME_LABEL[e.kind] ?? e.kind)}</b>${e.actual_time ? ` at ${esc(fmtExchangeTime(e.actual_time))}` : ""}${e.note ? ` — ${esc(e.note)}` : ""}${stands ? "" : ` <span class="note-cat">replaced</span>`}
-            ${answered.map(r => `<div style="margin-left:12px">${esc(memberName(r.created_by))} ${r.kind === "dispute" ? "disputes this" : "acknowledges this"}${r.note ? `: ${esc(r.note)}` : ""}${r.kind === "dispute" ? photoStrip(r, r.created_by === me?.id) : ""}</div>`).join("")}
-            ${photoStrip(e, mine && stands)}
+            ${esc(memberName(e.created_by))}${only}: <b>${esc(OUTCOME_LABEL[e.kind] ?? e.kind)}</b>${e.actual_time ? ` at ${esc(fmtExchangeTime(e.actual_time))}` : ""}${later}${e.note ? ` — ${esc(e.note)}` : ""}${!stands ? ` <span class="note-cat">replaced</span>` : replacedFor.length ? ` <span class="note-cat">replaced for ${esc(namesOf(replacedFor))}</span>` : ""}
+            ${answered.map(r => `<div style="margin-left:12px">${esc(memberName(r.entry.created_by))} ${r.entry.kind === "dispute" ? "disputes this" : "acknowledges this"}${r.entry.note ? `: ${esc(r.entry.note)}` : ""}${r.entry.kind === "dispute" ? photoStrip(photoRow(r.rows), r.entry.created_by === me?.id) : ""}</div>`).join("")}
+            ${photoStrip(photoRow(a.rows), mine && stands)}
             ${answerButtons}
           </div>`;
       }).join("");
-      // Correcting offers the outcomes other than the one already standing.
-      const outcomeBtn = (kind, label, primary) => myStanding?.kind === kind && kind === "exchange_as_planned" ? ""
-        : `<button class="btn btn-sm${primary && !myStanding ? " btn-primary" : ""}" data-outcome="${esc(t.child_id)}|${esc(t.day)}|${kind}">${label}</button>`;
-      const buttons = `
-        <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap" data-testid="${myStanding ? "exchange-correct" : "exchange-record"}">
-          ${myStanding ? `<span class="muted">Correct your account:</span>` : ""}
-          ${outcomeBtn("exchange_as_planned", "Happened as planned", true)}
-          ${outcomeBtn("exchange_late", "Late…", false)}
-          ${outcomeBtn("exchange_missed", "Didn't happen…", false)}
+
+      const badge = isFuture ? `<span class="badge b-pending">Upcoming</span>`
+        : state === "unrecorded" ? ""
+        : `<span class="badge ${state === "disputed" || state === "mixed" || state === "partial" ? "b-pending" : state === "exchange_as_planned" ? "b-locked" : "b-cancelled"}">${esc(OUTCOME_LABEL[state] ?? state)}</span>`;
+      const buttons = [
+        offerCheckin ? `<button class="btn btn-primary btn-sm" data-checkin="${index}" data-testid="exchange-checkin">I'm here</button>` : "",
+        // With several children the note's child is chosen, never assumed.
+        isFuture || isToday ? `<button class="btn btn-sm" data-addfor="${several ? "" : esc(g.child_ids[0])}|${esc(g.day)}">Note for this handoff</button>` : "",
+        // Not for a day the hub would still refuse as the future (the
+        // household's, which a schedule kept further east can run ahead of).
+        isFuture || g.day > today ? "" : `<button class="btn btn-sm" data-record-outcome="${index}" data-testid="exchange-record">Record the outcome…</button>`,
+      ].filter(Boolean).join(" ");
+      return `
+        <div data-testid="exchange-row" data-exchange="${index}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">
+          <div class="spread">
+            <div><strong>${esc(title)}</strong><div class="muted">${when}</div></div>
+            ${badge}
+          </div>
+          ${notesHtml}${checkinsHtml}${accountsHtml}
+          <div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap">${buttons}</div>
         </div>`;
-      return `<div data-testid="exchange-row" data-exchange="${esc(t.child_id)}|${esc(t.day)}" style="padding:8px 0;border-top:1px solid var(--hub-border,#f3f4f6)">${head}${entries}${buttons}</div>`;
+    }
+
+    /** The children of an exchange this adult has not checked in for. */
+    function uncheckedChildren(g, checkins = exchangeCheckins(custodyLog, g)) {
+      const done = new Set(checkins.filter(c => c.created_by === me?.id).flatMap(c => c.child_ids));
+      return g.child_ids.filter(cid => !done.has(cid));
+    }
+
+    /**
+     * "I'm here": one check-in row per child of the exchange, stored together
+     * (one `exchange_id`, one request). The time is the hub's `created_at`;
+     * nothing here sends one.
+     */
+    async function checkIn(g, btn) {
+      if (btn?.disabled) return;
+      if (btn) btn.disabled = true;   // at once: the question below takes a moment to answer
+      // A check-in is permanent and stamps the time it was made, so a tap
+      // hours ahead of the exchange (a slip beside "Note for this handoff")
+      // is asked about before it goes on the record.
+      const zone = exchangeZone(g);
+      const offset = minutesFromAgreed(new Date().toISOString(), g.day, g.exchange_time, zone);
+      if (offset !== null && Math.abs(offset) > 60) {
+        const ok = await hubConfirm({
+          message: "Check in now?",
+          description: `The exchange ${offset < 0 ? "is" : "was"} at ${fmtExchangeTime(g.exchange_time)}. Your check-in is recorded at the time you make it — ${describeArrival(offset)} — and stays on the record.`,
+        });
+        if (!ok) { if (btn) btn.disabled = false; return; }
+      }
+      const rows = uncheckedChildren(g).map(child_id => ({ child_id, day: g.day, kind: CHECKIN_KIND }));
+      if (!rows.length) { render(); return; }   // already done, from another device: catch the view up
+      await saveLogEntries(rows, btn, "I'm here", [], { together: true });
     }
 
     // The views that draw from the journal: the exchange list and its notes,
@@ -2187,103 +2389,199 @@
 
     /** Append one journal entry. `btn` is disabled while it saves; the entry is
      *  shown at once and the other parent is told. */
-    async function saveLogEntry(data, btn, label, photos = []) {
-      if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
-      const now = new Date().toISOString();
-      try {
-        // The id is minted once per button and sent with the record, so a
-        // retry after a lost answer finds the entry the first try stored
-        // instead of appending a second one the journal can never remove. The
-        // hub answers a repeat of its own writer's id as stored.
-        // Pinned WITH what was sent: a retry that sends different fields is a
-        // different entry, so it gets a new id rather than being answered with
-        // a record that says something else. The journal is append-only — an
-        // edit after a lost answer is a correction, and a correction is a new
-        // entry, never a silent rewrite of the one the first try may have stored.
-        const payload = JSON.stringify(data);
-        if (btn && btn.dataset.recordPayload !== payload) { delete btn.dataset.recordId; btn.dataset.recordPayload = payload; }
-        let id = btn ? (btn.dataset.recordId ||= crypto.randomUUID()) : crypto.randomUUID();
-        if (!DEMO) {
-          // An answer goes through its own record, which the hub refuses unless
-          // the entry it names exists and is one this parent can read.
-          // And "where the child was" has its own, which requires a parent.
-          const record = data.kind === "acknowledge" || data.kind === "dispute" ? "custody_answers"
-            : data.kind === "child_with" ? "custody_facts"
-            : data.kind === "note" ? "custody_notes" : "custody_log";
-          const r = await appendRecord(record, { id, ...data });
-          id = r.id ?? id;
-        }
-        if (btn) { delete btn.dataset.recordId; delete btn.dataset.recordPayload; }
-        // A refresh that read the table after the hub stored this entry, and
-        // landed before the append's own answer did, has already adopted it.
-        // Replace that copy rather than add a second one: the same entry drawn
-        // twice reads as two accounts.
-        custodyLog = custodyLog.filter(e => e.id !== id);
-        custodyLog.unshift({ id, parent_id: null, actual_time: null, responds_to_id: null, note: null, ...data, created_by: me?.id, created_at: now });
-        journalVersion++;
-        closeModal(); render();
-        const what = data.kind === "child_with" ? `recorded where ${memberName(data.child_id)} was on ${fmtHandoffDay(data.day)}`
-          : data.kind === "note" ? `added a journal entry about ${memberName(data.child_id)} for ${fmtHandoffDay(data.day)}`
-          : data.kind === "acknowledge" || data.kind === "dispute" ? `${data.kind === "dispute" ? "disputed" : "acknowledged"} your entry for ${fmtHandoffDay(data.day)}`
-          : `recorded ${memberName(data.child_id)}'s exchange on ${fmtHandoffDay(data.day)}: ${(OUTCOME_LABEL[data.kind] ?? data.kind).toLowerCase()}`;
-        notifyPartner("Custody journal", `${me?.name} ${what}.`, { view: "handoffs" });
-        // Photos picked with the entry are attached once it is on the record;
-        // a failure there is reported on its own and the entry stands.
-        if (photos.length) await attachPhotos({ id, child_id: data.child_id }, photos);
-        return id;
-      } catch (e) {
-        console.error("save journal entry failed", e);
-        // The answer was lost: the entry may be on the record. Read it back by
-        // the pinned id before offering a retry, so a retry only ever happens
-        // when nothing was stored — and what is shown is what the hub holds.
-        if (!DEMO && btn && outcomeUnknown(e)) {
-          const stored = await db(`SELECT * FROM ${P}custody_log WHERE id = ?`, [btn.dataset.recordId]).then(r => r.rows?.[0] ?? null).catch(() => null);
-          if (stored) {
-            delete btn.dataset.recordId; delete btn.dataset.recordPayload;
-            custodyLog = [stored, ...custodyLog.filter(x => x.id !== stored.id)];
-            journalVersion++;
-            closeModal(); render();
-            notifyPartner("Custody journal", `${me?.name} added to the custody journal for ${fmtHandoffDay(stored.day)}.`, { view: "handoffs" });
-            if (storedDiffers(stored, data)) hubAlert("Your entry was already on the record as first entered. A correction is a new entry.");
-            // The photos picked with it still belong to it: the entry is on the
-            // record, and only the answer was lost.
-            if (photos.length) await attachPhotos({ id: stored.id, child_id: stored.child_id }, photos);
-            return stored.id;
-          }
-        }
-        if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
-        // An answer names the entry it answers: a 404 or 409 is about THAT entry.
-        hubAlert(failureLine(e, { action: "save the journal entry", thing: "journal entry" }));
-        return false;
-      }
+    function saveLogEntry(data, btn, label, photos = []) {
+      return saveLogEntries([data], btn, label, photos);
     }
 
-    function openOutcomeModal(t, kind) {
-      const late = kind === "exchange_late";
+    /** Which append record takes a journal row of this kind. Each kind has its
+     *  own, with its own required columns; the hub refuses the rest. */
+    function journalRecordFor(kind) {
+      // An answer is refused unless the entry it names exists and is one this
+      // parent can read; "where the child was" requires a parent; a check-in
+      // takes no time at all, because its time is the hub's.
+      return kind === "acknowledge" || kind === "dispute" ? "custody_answers"
+        : kind === "child_with" ? "custody_facts"
+        : kind === "note" ? "custody_notes"
+        : kind === CHECKIN_KIND ? "custody_checkins" : "custody_log";
+    }
+
+    /**
+     * Journal saves sent and not yet known to be on the record, by what was
+     * sent (`JSON.stringify` of the rows): the ids pinned to them and their
+     * exchange. Keyed by content, not by button — a redraw replaces the
+     * button, and a retry must still send the ids the first try sent.
+     */
+    const pendingJournalSaves = new Map();
+
+    /**
+     * Append journal rows of one kind — one, or one per child of an exchange —
+     * as one account. Several rows go in ONE request, which the hub stores all
+     * or none (`{ rows }`), so an account is never left half on the record.
+     * With `together`, the rows share an `exchange_id` and are shown as one
+     * line (collapseByExchange). Photos go on the first row.
+     *
+     * The ids are minted once and sent with the rows, so a retry after a lost
+     * answer finds what the first try stored instead of appending it again;
+     * the hub answers a repeat of its own writer's ids as stored. Pinned WITH
+     * what was sent: a retry that sends different fields is a different
+     * account and gets new ids. Once on the record the pin is dropped, so the
+     * same words recorded again later are a new entry.
+     */
+    async function saveLogEntries(rows, btn, label, photos = [], { together = false } = {}) {
+      if (!rows.length) return false;
+      if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+      const key = JSON.stringify(rows);
+      let pin = pendingJournalSaves.get(key);
+      if (!pin) {
+        // A save from a form is forgotten with the form (closeModal); one
+        // from a card ("I'm here") is kept for its retry, however the card
+        // is redrawn.
+        pin = { ids: rows.map(() => crypto.randomUUID()), exchange_id: together ? crypto.randomUUID() : null,
+                form: btn && modalEl?.contains(btn) ? modalEl : null };
+        pendingJournalSaves.set(key, pin);
+      }
+      const sent = rows.map((row, i) => ({ id: pin.ids[i], ...row, ...(pin.exchange_id ? { exchange_id: pin.exchange_id } : {}) }));
+      let stored = null, differed = false;
+      try {
+        const now = new Date().toISOString();
+        let answered = sent.map(row => ({ id: row.id, created_at: now }));
+        if (!DEMO) {
+          const r = await appendRecord(journalRecordFor(rows[0].kind), sent.length === 1 ? sent[0] : { rows: sent });
+          answered = sent.length === 1 ? [{ id: r.id, created_at: r.created_at }] : (r.rows ?? []);
+        }
+        // The hub's time, never this device's: a check-in IS that time.
+        stored = sent.map((row, i) => ({
+          parent_id: null, actual_time: null, responds_to_id: null, exchange_id: null, note: null, ...row,
+          id: answered[i]?.id ?? row.id, created_by: me?.id, created_at: answered[i]?.created_at ?? now,
+        }));
+      } catch (e) {
+        console.error("save journal entry failed", e);
+        // The answer was lost: the account may be on the record — all of it,
+        // or none. Read it back by the pinned ids before offering a retry, so
+        // a retry only happens when nothing was stored, and what is shown is
+        // what the hub holds.
+        if (!DEMO && outcomeUnknown(e)) {
+          const found = await db(`SELECT * FROM ${P}custody_log WHERE id IN (${pin.ids.map(() => "?").join(", ")})`, pin.ids)
+            .then(r => r.rows ?? []).catch(() => []);
+          if (found.length) {
+            stored = found;
+            differed = found.some(row => storedDiffers(row, sent.find(x => x.id === row.id) ?? {}));
+          }
+        }
+        if (!stored) {
+          // Refused outright, nothing was stored: the ids are not needed again.
+          if (!outcomeUnknown(e)) pendingJournalSaves.delete(key);
+          if (btn) { btn.disabled = false; btn.textContent = label ?? "Save"; }
+          // An answer names the entry it answers: a 404 or 409 is about THAT entry.
+          hubAlert(failureLine(e, { action: "save the journal entry", thing: "journal entry" }));
+          return false;
+        }
+      }
+      pendingJournalSaves.delete(key);
+
+      // Shown at once — replacing any copy a refresh adopted first: the same
+      // entry drawn twice reads as two accounts.
+      const ids = new Set(stored.map(r => r.id));
+      custodyLog = [...stored, ...custodyLog.filter(e => !ids.has(e.id))];
+      journalVersion++;
+      // Drawn once: closing the modal pays the redraw it is owed. Only the
+      // modal this save was made from is closed — judged now, as it lands:
+      // one cancelled while it saved may have been replaced by another.
+      journalRedrawOwed = true;
+      if (btn && modalEl?.contains(btn)) closeModal();
+      else if (!modalEl) { journalRedrawOwed = false; render(); }
+      const data = stored.find(r => r.id === pin.ids[0]) ?? stored[0];
+      const kids = namesOf([...new Set(stored.map(r => r.child_id))]);
+      const what = data.kind === CHECKIN_KIND ? `checked in at the exchange for ${kids}`
+        : data.kind === "child_with" ? `recorded where ${kids} was on ${fmtHandoffDay(data.day)}`
+        : data.kind === "note" ? `added a journal entry about ${kids} for ${fmtHandoffDay(data.day)}`
+        : data.kind === "acknowledge" || data.kind === "dispute" ? `${data.kind === "dispute" ? "disputed" : "acknowledged"} your entry for ${fmtHandoffDay(data.day)}`
+        : `recorded ${kids}'s exchange on ${fmtHandoffDay(data.day)}: ${(OUTCOME_LABEL[data.kind] ?? data.kind).toLowerCase()}`;
+      notifyPartner("Custody journal", `${me?.name} ${what}.`, { view: "handoffs" });
+      if (differed) hubAlert("Your entry was already on the record as first entered. A correction is a new entry.");
+      // Photos picked with the entry are attached once it is on the record;
+      // a failure there is reported on its own and the entry stands.
+      if (photos.length) await attachPhotos({ id: data.id, child_id: data.child_id }, photos);
+      return data.id;
+    }
+
+    /**
+     * Record by hand how an exchange went, for every child in it: as planned,
+     * late (at the time the parent gives), or not at all. A check-in at the
+     * exchange is the better record — it carries the hub's time — and this is
+     * for when there was none: forgotten, or nobody came.
+     */
+    function openOutcomeModal(g) {
+      const first = g.transitions[0];
+      const title = exchangeTitle(g);
+      // Correcting starts from the account as it stands, so adding a note to
+      // "Didn't happen" cannot quietly turn it into "as planned".
+      // This parent's standing account for each child, read once for the form.
+      const mineByChild = new Map(g.child_ids.map(cid => [cid, myStandingAccount(g, cid)]));
+      const standing = [...mineByChild.values()].find(Boolean);
+      const startKind = standing?.kind ?? "exchange_as_planned";
+      const choice = (kind, label) =>
+        `<label class="row" style="gap:8px"><input type="radio" name="o-kind" value="${kind}" ${kind === startKind ? "checked" : ""}> ${label}</label>`;
       openModal(`
-        <h3>${late ? "Late exchange" : "Exchange didn't happen"}</h3>
-        <p class="muted">${esc(t.title)} · ${esc(fmtHandoffDay(t.day, todayStr()))}${t.exchange_time ? ` · planned ${esc(fmtExchangeTimeLabel(t))}` : ""}</p>
-        ${late ? `<label class="field"><span>Actual time</span><input type="time" id="o-time" data-autofocus value="${esc(t.exchange_time ?? "")}"></label>` : ""}
-        <label class="field"><span>Note (optional)</span><textarea id="o-note" ${late ? "" : "data-autofocus"} maxlength="2000" placeholder="${late ? "e.g. Traffic on the bridge." : "e.g. No one at the pickup point; waited 30 minutes."}"></textarea></label>
+        <h3>${standing ? "Correct your account" : "Record the outcome"}</h3>
+        <p class="muted">${esc(title)} · ${esc(fmtHandoffDay(g.day, todayStr()))}${first.exchange_time ? ` · planned ${esc(fmtExchangeTimeLabel(first))}` : ""}</p>
+        <div class="field"><span>What happened</span>
+          ${choice("exchange_as_planned", "Happened as planned")}
+          ${choice("exchange_late", "Late")}
+          ${choice("exchange_missed", "Didn't happen")}
+        </div>
+        <label class="field" id="o-time-field" style="display:${startKind === "exchange_late" ? "block" : "none"}"><span>Actual time</span><input type="time" id="o-time" value="${esc(standing?.actual_time ?? g.exchange_time ?? "")}"></label>
+        <label class="field"><span>Note (optional)</span><textarea id="o-note" maxlength="2000" placeholder="e.g. No one at the pickup point; waited 30 minutes.">${esc(standing?.note ?? "")}</textarea></label>
         ${photosField("o-photos")}
-        <p class="hint">This is your account. ${esc(memberName(partnerId) || "The other parent")} can acknowledge or dispute it, and both accounts stay on the record.</p>
+        <p class="hint">This is your account, recorded now. ${esc(memberName(partnerId) || "The other parent")} can acknowledge or dispute it, and both accounts stay on the record.</p>
         <div class="modal-actions">
           <button class="btn" data-close>Cancel</button>
           <button class="btn btn-primary" id="save-outcome">Record</button>
         </div>`);
+      const kindNow = () => modalEl.querySelector('input[name="o-kind"]:checked')?.value;
+      modalEl.querySelectorAll('input[name="o-kind"]').forEach(r => r.addEventListener("change", () => {
+        modalEl.querySelector("#o-time-field").style.display = kindNow() === "exchange_late" ? "block" : "none";
+      }));
       modalEl.querySelector("#save-outcome").addEventListener("click", async () => {
+        const kind = kindNow();
+        if (!kind) return;
+        const late = kind === "exchange_late";
         const actual_time = late ? modalEl.querySelector("#o-time").value : "";
         if (late && !/^\d{2}:\d{2}$/.test(actual_time)) { modalEl.querySelector("#o-time").focus(); return; }
         const note = modalEl.querySelector("#o-note").value.trim();
-        await saveLogEntry({ child_id: t.child_id, day: t.day, kind, ...(late ? { actual_time } : {}), ...(note ? { note } : {}) },
-          modalEl.querySelector("#save-outcome"), "Record", pickedPhotos("o-photos"));
+        const photos = pickedPhotos("o-photos");
+        // The journal can never remove an entry, so the account this parent
+        // already stands on is not appended a second time — for any child.
+        const standsAlready = cid => {
+          const mine = mineByChild.get(cid);
+          return !!mine && mine.kind === kind && (mine.actual_time ?? "") === actual_time && (mine.note ?? "") === note;
+        };
+        const children = g.child_ids.filter(cid => !standsAlready(cid));
+        if (!children.length) {
+          if (!photos.length) { hubAlert("That is already your account of this exchange."); return; }
+          // Photos for an account already on the record go on it.
+          const row = photoRow([...mineByChild.values()].filter(Boolean));
+          closeModal();
+          await attachPhotos({ id: row.id, child_id: row.child_id }, photos);
+          return;
+        }
+        const rows = children.map(child_id =>
+          ({ child_id, day: g.day, kind, ...(late ? { actual_time } : {}), ...(note ? { note } : {}) }));
+        await saveLogEntries(rows, modalEl.querySelector("#save-outcome"), "Record", photos, { together: true });
       });
     }
 
-    function openResponseModal(entry) {
+    /** This parent's account of one child's exchange as it stands, or null. */
+    function myStandingAccount(g, childId) {
+      return exchangeOutcome(custodyLog, childId, g.day).standing.find(e => e.created_by === me?.id) ?? null;
+    }
+
+    /** Dispute an account — every row of it, one per child it was given for. */
+    function openResponseModal(rows) {
+      const entry = rows[0];
       openModal(`
         <h3>Dispute this entry</h3>
-        <p class="muted">${esc(memberName(entry.created_by))} recorded: <b>${esc(OUTCOME_LABEL[entry.kind] ?? entry.kind)}</b>${entry.actual_time ? ` at ${esc(fmtExchangeTime(entry.actual_time))}` : ""} for ${esc(memberName(entry.child_id))} on ${esc(fmtHandoffDay(entry.day, todayStr()))}.</p>
+        <p class="muted">${esc(memberName(entry.created_by))} recorded: <b>${esc(OUTCOME_LABEL[entry.kind] ?? entry.kind)}</b>${entry.actual_time ? ` at ${esc(fmtExchangeTime(entry.actual_time))}` : ""} for ${esc(namesOf([...new Set(rows.map(r => r.child_id))]))} on ${esc(fmtHandoffDay(entry.day, todayStr()))}.</p>
         <label class="field"><span>Your account</span><textarea id="r-note" data-autofocus maxlength="2000" placeholder="What happened, as you saw it."></textarea></label>
         ${photosField("r-photos")}
         <div class="modal-actions">
@@ -2293,8 +2591,8 @@
       modalEl.querySelector("#save-response").addEventListener("click", async () => {
         const note = modalEl.querySelector("#r-note").value.trim();
         if (!note) { modalEl.querySelector("#r-note").focus(); return; }
-        await saveLogEntry({ child_id: entry.child_id, day: entry.day, kind: "dispute", responds_to_id: entry.id, note },
-          modalEl.querySelector("#save-response"), "Record dispute", pickedPhotos("r-photos"));
+        await saveLogEntries(rows.map(r => ({ child_id: r.child_id, day: r.day, kind: "dispute", responds_to_id: r.id, note })),
+          modalEl.querySelector("#save-response"), "Record dispute", pickedPhotos("r-photos"), { together: true });
       });
     }
 
@@ -2533,6 +2831,8 @@
       focusAutofocus(modalEl);
     }
     function closeModal() {
+      // A form's pinned journal ids go with it: reopened, it is a new entry.
+      for (const [key, pin] of pendingJournalSaves) if (pin.form && pin.form === modalEl) pendingJournalSaves.delete(key);
       modalEl?.remove(); modalEl = null;
       // Cancelled or saved, the view underneath may be showing rows older than
       // the ones a refresh adopted while this was open (see refreshJournal).
@@ -2577,8 +2877,7 @@
       const e = { ...(existing || {}), ...(draft || {}) };
       // The proposer's own zone is offered, and is the default when the tenant
       // has nothing better than UTC to suggest — see timeZoneChoices.
-      let deviceZone = null;
-      try { deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { /* no Intl zone: offer what we have */ }
+      const deviceZone = deviceTimeZone();   // null without an Intl zone: offer what we have
       const { zones, selected: zone } = timeZoneChoices({ current: e.timezone, space: spaceTimeZone, device: deviceZone });
       openModal(`
         <h3>${existing ? "Propose a schedule change" : "Propose a custody schedule"}</h3>
@@ -2714,11 +3013,11 @@
     function openHandoffModal(preset) {
       const kids = childIds();
       const initialChild = preset?.child_id ?? kids[0];
-      const initialDate  = preset?.day ?? todayStr();
+      const initialDate  = preset?.day || todayStr();
 
       openModal(`
-        <h3>Add handoff note</h3>
-        <label class="field"><span>Child</span><select id="h-child">${kids.map(c =>
+        <h3>Note for this handoff</h3>
+        <label class="field"><span>Child</span><select id="h-child">${initialChild === "" ? `<option value="" selected disabled>Choose a child…</option>` : ""}${kids.map(c =>
           `<option value="${esc(c)}" ${c === initialChild ? "selected" : ""}>${esc(memberName(c))}</option>`).join("")}</select></label>
         <label class="field"><span>For which handoff</span>
           <select id="h-when"></select>
@@ -2743,7 +3042,8 @@
 
       function refreshWhen() {
         const childId = childEl.value;
-        const options = upcomingTransitions(custodyDays, todayStr(), { childId });
+        // No child chosen yet: no handoffs to offer, or every child's would be.
+        const options = childId ? upcomingTransitions(custodyDays, todayStr(), { childId }) : [];
         whenEl.innerHTML = options.map(t =>
           `<option value="${esc(t.day)}">${esc(fmtHandoffDay(t.day))} · ${esc(t.title)}${t.exchange_time ? ` · ${esc(fmtExchangeTimeLabel(t))}` : ""}</option>`
         ).join("") + `<option value="">Another day…</option>`;

@@ -263,7 +263,7 @@ describe("manifest ↔ app agreement", async () => {
     // Only an exchange account is answerable — never an answer, never a fact,
     // and not a journal note until the app draws answers under notes.
     expect(answers.parent_status_column).toBe("kind");
-    expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with", "note"]);
+    expect(answers.parent_blocked_status_values).toEqual(["acknowledge", "dispute", "child_with", "note", "exchange_checkin"]);
     expect(answers.value_formats).toEqual({ day: "date_not_future" });
     expect(answers.required_columns).toContain("responds_to_id");
     expect(answers.allowed_columns).not.toContain("parent_id");
@@ -391,9 +391,10 @@ describe("manifest ↔ app agreement", async () => {
       expect(rec.parent_table).toBe("custody_log");
       expect(rec.parent_fk_column).toBe("entry_id");
       // A photo documents an account — an exchange, where the child was, a
-      // note, or a dispute — never a bare acknowledgement; and only its own
-      // author's: the hub refuses a photo on the other parent's testimony.
-      expect(rec.parent_blocked_status_values).toEqual(["acknowledge"]);
+      // note, or a dispute — never a bare acknowledgement or a check-in (a
+      // time, which nothing draws photos beside); and only its own author's:
+      // the hub refuses a photo on the other parent's testimony.
+      expect(rec.parent_blocked_status_values).toEqual(["acknowledge", "exchange_checkin"]);
       expect(rec.parent_owner_column).toBe("created_by");
       expect(rec.required_columns).toEqual(["entry_id", "child_id", "photo_file_id"]);
       expect(rec.write_acl).toEqual({ require_role: "adult" });
@@ -432,6 +433,29 @@ describe("manifest ↔ app agreement", async () => {
       expect(view.source.query).toContain("COALESCE(l.day, substr(p.created_at, 1, 10)) >= :range_start");
       expect(manifest.reports.views.length).toBeLessThanOrEqual(12);
     });
+  });
+
+  // A check-in is the hub's time, not a parent's: its record takes no time
+  // column at all, so the only time it carries is the created_at the hub
+  // stamps. It is not answered — the other parent checks in too — and rows
+  // written together for one exchange share an exchange_id.
+  it("takes a check-in at an exchange with no time of its own", () => {
+    const rec = manifest.append_only_records.custody_checkins;
+    expect(rec).toMatchObject({
+      table: "custody_log", writer_column: "created_by", created_at_column: "created_at",
+      write_acl: { require_role: "adult" }, value_formats: { day: "date_not_future" },
+    });
+    expect(rec.allowed_values).toEqual({ kind: ["exchange_checkin"] });
+    // Nothing but who, when (the hub's) and for which child: no words, no time.
+    expect(rec.allowed_columns).toEqual(["child_id", "day", "kind", "exchange_id"]);
+    expect(manifest.append_only_records.custody_answers.parent_blocked_status_values).toContain("exchange_checkin");
+    for (const name of ["custody_log", "custody_checkins", "custody_answers"]) {
+      expect(manifest.append_only_records[name].allowed_columns).toContain("exchange_id");
+      expect(manifest.append_only_records[name].max_text_lengths.exchange_id).toBe(64);
+    }
+    // Plaintext by its `_id` suffix; listing it as well would only restate it.
+    expect(manifest.db_plaintext_columns).not.toContain("exchange_id");
+    expect(manifest.reports.views.find((v) => v.id === "exchange_log").description).toContain("exchange_checkin");
   });
 
   // A dated entry not tied to an exchange, through its own record over the

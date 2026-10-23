@@ -2010,3 +2010,165 @@ export function journalNotes(log) {
     .filter((e) => e.kind === "note")
     .sort((a, b) => String(b.day).localeCompare(String(a.day)) || String(b.created_at).localeCompare(String(a.created_at)));
 }
+
+// ── Exchanges and check-ins ──────────────────────────────────────────────────
+//
+// custody_days has one transition per child. Children who change homes
+// together — the same day, from the same parent to the same parent, at the
+// same time — are one exchange to the parents standing in the car park, and
+// are shown and recorded as one. The journal stays one row per child (the
+// reports are per child); rows written together share an `exchange_id`.
+//
+// A check-in is the hub saying when it heard from a parent at an exchange: its
+// time is `created_at`, which the hub stamps, never a time anyone typed. How
+// it stands against the agreed time is worked out here, in the schedule's
+// timezone, and said as a fact ("19 min after the agreed time"), not a verdict.
+
+export const CHECKIN_KIND = "exchange_checkin";
+
+/**
+ * The timezone a custody day's agreed time is on: that of the agreed version
+ * that produced it (`source_version_id`), so a later amendment to another zone
+ * never moves the clock an earlier exchange was kept on. A version kept no
+ * zone of its own was on `fallbackZone` (the space's). Undefined when the day
+ * names no version this list holds — the caller decides what stands in.
+ */
+export function transitionTimeZone(transition, versions, fallbackZone = "") {
+  const id = transition?.source_version_id;
+  if (!id) return undefined;
+  const version = (versions || []).find((v) => v.id === id);
+  if (!version) return undefined;
+  return version.timezone || fallbackZone || "";
+}
+
+/** Transitions grouped into exchanges, in the order they arrive. `zoneOf`
+ *  (transition → the timezone its agreed time is on) keeps apart children
+ *  whose "17:00" is not the same moment.
+ *  → [{ key, day, from_parent_id, parent_id, exchange_time, zone, transitions, child_ids }] */
+export function groupExchanges(transitions, zoneOf = () => "") {
+  const groups = new Map();
+  for (const t of transitions || []) {
+    const zone = zoneOf(t) ?? "";
+    const key = [t.day, t.from_parent_id ?? "", t.parent_id ?? "", t.exchange_time ?? "", zone].join("\u0000");
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, day: t.day, from_parent_id: t.from_parent_id ?? null, parent_id: t.parent_id ?? null,
+            exchange_time: t.exchange_time ?? null, zone: zone || null, transitions: [], child_ids: [] };
+      groups.set(key, g);
+    }
+    if (g.child_ids.includes(t.child_id)) continue;
+    g.transitions.push(t);
+    g.child_ids.push(t.child_id);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * The wall-clock date and time of an instant in a timezone, or null for an
+ * unreadable instant or zone.
+ * → { date: 'YYYY-MM-DD', hhmm: 'HH:MM', minutes }   (minutes since midnight)
+ */
+const zoneFormats = new Map();   // timeZone → Intl.DateTimeFormat, or null for a zone Intl refuses
+
+export function localDateTime(iso, timeZone) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const zone = timeZone || "UTC";
+  if (!zoneFormats.has(zone)) {
+    let format = null;
+    try {
+      format = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      });
+    } catch { /* not a zone this runtime knows */ }
+    zoneFormats.set(zone, format);
+  }
+  const format = zoneFormats.get(zone);
+  if (!format) return null;
+  const parts = format.formatToParts(d);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  const hh = get("hour"), mm = get("minute");
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, hhmm: `${hh}:${mm}`, minutes: Number(hh) * 60 + Number(mm) };
+}
+
+/** How long after a late-evening exchange's agreed time, once midnight has
+ *  passed, a check-in is still measured against it. */
+export const PAST_MIDNIGHT_MINUTES = 6 * 60;
+
+/**
+ * Minutes between the agreed exchange time and a check-in: positive after,
+ * negative before. A check-in made on the exchange's day in the schedule's
+ * timezone is measured; so is one in the small hours after it, when the
+ * exchange was late in the evening and the agreed time is no more than
+ * PAST_MIDNIGHT_MINUTES ago.
+ * Otherwise null — a check-in the next morning is not "15 hours late", it is
+ * a check-in on another day. Null too when there is no agreed time.
+ */
+export function minutesFromAgreed(checkedInAt, day, exchangeTime, timeZone) {
+  // Wall-clock minutes: on a night the clocks change, an hour off.
+  const m = /^(\d{2}):(\d{2})$/.exec(String(exchangeTime ?? ""));
+  if (!m) return null;
+  const local = localDateTime(checkedInAt, timeZone);
+  if (!local) return null;
+  const agreed = Number(m[1]) * 60 + Number(m[2]);
+  if (local.date === day) return local.minutes - agreed;
+  if (local.date !== addDays(day, 1)) return null;
+  const minutes = 24 * 60 + local.minutes - agreed;
+  return minutes <= PAST_MIDNIGHT_MINUTES ? minutes : null;
+}
+
+/** "at the agreed time", "19 min after the agreed time", "1 h 5 min before …", or "". */
+export function describeArrival(minutes) {
+  if (minutes == null || !Number.isFinite(minutes)) return "";
+  if (minutes === 0) return "at the agreed time";
+  const n = Math.abs(minutes);
+  const amount = n < 60 ? `${n} min` : `${Math.floor(n / 60)} h${n % 60 ? ` ${n % 60} min` : ""}`;
+  return `${amount} ${minutes > 0 ? "after" : "before"} the agreed time`;
+}
+
+/**
+ * The check-ins at one exchange, earliest first: one per tap of "I'm here" —
+ * an adult's rows for several children written together (one `exchange_id`)
+ * are one arrival, at the earliest of them. A later tap for a child who joined
+ * the exchange afterwards is its own arrival, at its own time. Rows with no
+ * `exchange_id` are taken together per adult.
+ * → [{ created_by, created_at, child_ids, entries }]
+ */
+export function exchangeCheckins(log, exchange) {
+  const kids = new Set(exchange?.child_ids ?? []);
+  const rows = (log || [])
+    .filter((e) => e.kind === CHECKIN_KIND && e.day === exchange?.day && kids.has(e.child_id))
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const byTap = new Map();
+  for (const e of rows) {
+    const key = `${e.created_by}\u0000${e.exchange_id ?? ""}`;
+    let c = byTap.get(key);
+    if (!c) { c = { created_by: e.created_by, created_at: e.created_at, child_ids: [], entries: [] }; byTap.set(key, c); }
+    if (!c.child_ids.includes(e.child_id)) c.child_ids.push(e.child_id);
+    c.entries.push(e);
+  }
+  return [...byTap.values()];
+}
+
+/**
+ * Journal rows as the accounts they are: rows one adult wrote together for
+ * several children (one `exchange_id`) are one account. Order is kept; an
+ * account stands where its first row stood. Rows with no `exchange_id` are
+ * each their own. Keyed by author as well: an `exchange_id` is readable, and
+ * one adult reusing another's must not fold their account into it.
+ * → [{ entry, rows, child_ids }]   (`entry` is the first row)
+ */
+export function collapseByExchange(entries) {
+  const out = [];
+  const byId = new Map();
+  for (const e of entries || []) {
+    const key = e.exchange_id ? `${e.created_by}\u0000${e.exchange_id}` : null;
+    const g = key ? byId.get(key) : null;
+    if (g) { g.rows.push(e); if (!g.child_ids.includes(e.child_id)) g.child_ids.push(e.child_id); continue; }
+    const fresh = { entry: e, rows: [e], child_ids: [e.child_id] };
+    out.push(fresh);
+    if (key) byId.set(key, fresh);
+  }
+  return out;
+}
