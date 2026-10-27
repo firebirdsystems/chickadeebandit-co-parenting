@@ -290,25 +290,6 @@ function reduceToPeriod(days) {
 }
 
 /**
- * A cycle's shape with its ORIENTATION kept: parent-swapped, but not rotated.
- *
- * Rotation invariance is right for a name that says nothing about weekdays —
- * 2-2-5-5 is 2-2-5-5 wherever you start counting. It is WRONG for a name that
- * does. "Every other weekend (Fri–Sat)" is a claim about which nights, and
- * which nights a position lands on depends on where day 1 is; rotate the array
- * and the same shape is a Saturday–Sunday arrangement wearing a Friday name.
- *
- * Parent swap stays invariant in both: no name here says which parent.
- */
-function orientedShape(cycle) {
-  const days = reduceToPeriod(normalizeCycle(cycle));
-  if (!days.length) return "";
-  const swapped = days.map((day) => (day === "a" ? "b" : "a")).join("");
-  const plain = days.join("");
-  return plain < swapped ? plain : swapped;
-}
-
-/**
  * The name for a cycle's shape, or null when it matches nothing known.
  *
  * Null is the common and correct answer: a hand-entered rotation that is not

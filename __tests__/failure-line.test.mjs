@@ -119,3 +119,25 @@ describe("storedDiffers", () => {
     expect(storedDiffers(undefined, { pattern: "custom" })).toBe(true);
   });
 });
+
+describe("failure lines on edge inputs", () => {
+  const sign = { action: "countersign this change", thing: "proposal" };
+  it("falls back to a retry line with no error at all", () => {
+    expect(agreementFailureLine(null, sign)).toBe("Couldn’t countersign this change — try again.");
+    expect(agreementFailureLine(undefined, { ...sign, state: "open" })).toBe("Couldn’t countersign this change — try again.");
+  });
+  it("reads retry-after and the proposal cap only on a 409", () => {
+    expect(agreementFailureLine(err({ status: 400, retryAfter: 5 }), { ...sign, state: "open" }))
+      .toBe("Couldn’t countersign this change — try again.");
+    expect(agreementFailureLine(err({ status: 400, code: "proposal_limit" }), { ...sign, state: "open" }))
+      .toBe("Couldn’t countersign this change — try again.");
+  });
+  it("does not call a 404 removed when a re-read found the row", () => {
+    expect(agreementFailureLine(err({ status: 404 }), { ...sign, state: "open" })).toBe("Couldn’t countersign this change — try again.");
+    expect(failureLine(err({ status: 404 }), { ...words, found: true })).toBe("You don’t have permission to save the draft.");
+  });
+  it("storedDiffers notices one changed field among several", () => {
+    expect(storedDiffers({ a: "1", b: "2" }, { a: "1", b: "3" })).toBe(true);
+    expect(storedDiffers({ a: "1", b: "2" }, { a: "1", b: "2" })).toBe(false);
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
   compileCycle,
   mergeScheduleVersion,
@@ -30,7 +30,7 @@ import {
   pairingState, messagesCoParent, hubMessagesUrl,
   recentTransitions, exchangeOutcome, actualParentForDay, parentingTimeSummary,
   HOLIDAY_PRESETS, easterSunday, holidaySpan, holidayForDate, nextHolidayOccurrence, describeHolidayRule,
-  cleanHolidayRule, holidayRulesBlocker, holidayProposalTerms, mergeHolidayVersion, parseHolidayRules, calendarCell,
+  cleanHolidayRule, holidayRulesBlocker, holidayProposalTerms, holidayRuleReadable, holidaySnapshot, mergeHolidayVersion, parseHolidayRules, calendarCell,
   CYCLE_PRESETS, nameForCycle, presetForCycle, cycleAnchorHint,
   weekdayOf, visitingWeekdays, formatWeekdaySpan,
   withinEffectiveWindow, scheduleHasEnded, calendarCell, monthBounds,
@@ -540,6 +540,67 @@ describe("overrides", () => {
   });
 });
 
+describe("effectiveForDate precedence", () => {
+  const WEEKS = JSON.stringify([...Array(7).fill("a"), ...Array(7).fill("b")]);
+  const sch = { child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", pattern: "alternating_weeks", cycle: WEEKS, cycle_length: 14, anchor_date: "2026-03-02" };
+  const july4 = { id: "july4", label: "Independence Day", kind: "fixed", month: 7, day: 4, even_years: "a", odd_years: "a" };
+  const holiday = { child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", rules: JSON.stringify([july4]) };
+  const ov = (id, parent_id, created_at, over = {}) => ({
+    id, child_id: "kid", start_date: "2026-07-03", end_date: "2026-07-05", parent_id, created_at, ...over,
+  });
+
+  it("resolves override over holiday over the rotation, each exactly", () => {
+    // 2026-07-04 is a "b" (dad) day in the rotation; the holiday gives it to mom.
+    expect(effectiveForDate(sch, [], "2026-07-04")).toEqual({ parent_id: "dad", source: "schedule" });
+    expect(effectiveForDate(sch, [], "2026-07-04", holiday))
+      .toEqual({ parent_id: "mom", source: "holiday", label: "Independence Day" });
+    expect(effectiveForDate(sch, [ov("s1", "dad", "2026-06-01T00:00:00Z")], "2026-07-04", holiday))
+      .toEqual({ parent_id: "dad", source: "override", override_id: "s1" });
+    // The day after the holiday, still inside the override: override, not holiday.
+    expect(effectiveForDate(sch, [ov("s1", "mom", "2026-06-01T00:00:00Z")], "2026-07-05", holiday))
+      .toEqual({ parent_id: "mom", source: "override", override_id: "s1" });
+  });
+
+  it("falls through to the holiday, then the rotation, when no override covers the day", () => {
+    const elsewhere = [ov("s1", "dad", "2026-06-01T00:00:00Z", { start_date: "2026-08-01", end_date: "2026-08-02" })];
+    expect(effectiveForDate(sch, elsewhere, "2026-07-04", holiday))
+      .toEqual({ parent_id: "mom", source: "holiday", label: "Independence Day" });
+    expect(effectiveForDate(sch, elsewhere, "2026-07-05", holiday)).toEqual({ parent_id: "dad", source: "schedule" });
+    expect(effectiveForDate(sch, null, "2026-07-04", holiday))
+      .toEqual({ parent_id: "mom", source: "holiday", label: "Independence Day" });
+    expect(effectiveForDate(sch, undefined, "2026-07-05")).toEqual({ parent_id: "dad", source: "schedule" });
+  });
+
+  it("the newest override wins whichever order the rows arrive in", () => {
+    const older = ov("old", "mom", "2026-06-01T00:00:00Z");
+    const newer = ov("new", "dad", "2026-06-02T00:00:00Z");
+    expect(effectiveForDate(sch, [older, newer], "2026-07-04", holiday))
+      .toEqual({ parent_id: "dad", source: "override", override_id: "new" });
+    expect(effectiveForDate(sch, [newer, older], "2026-07-04", holiday))
+      .toEqual({ parent_id: "dad", source: "override", override_id: "new" });
+  });
+
+  it("keeps the first of two overrides created at the same instant", () => {
+    const first = ov("first", "mom", "2026-06-01T00:00:00Z");
+    const second = ov("second", "dad", "2026-06-01T00:00:00Z");
+    expect(effectiveForDate(sch, [first, second], "2026-07-04").override_id).toBe("first");
+    expect(effectiveForDate(sch, [second, first], "2026-07-04").override_id).toBe("second");
+  });
+
+  it("applies a holiday schedule only to the child it was agreed for", () => {
+    expect(effectiveForDate(sch, [], "2026-07-04", { ...holiday, child_id: "sibling" }))
+      .toEqual({ parent_id: "dad", source: "schedule" });
+    expect(effectiveForDate({ ...sch, child_id: "sibling" }, [], "2026-07-04", holiday))
+      .toEqual({ parent_id: "dad", source: "schedule" });
+  });
+
+  it("resolves nobody outside the version's effective window, override or not", () => {
+    const ended = { ...sch, effective_to: "2026-07-01" };
+    expect(effectiveForDate(ended, [ov("s1", "dad", "t")], "2026-07-04", holiday))
+      .toEqual({ parent_id: null, source: "schedule" });
+  });
+});
+
 describe("lockedSwapOverrides", () => {
   const swap = (over = {}) => ({
     id: "sw-1", child_id: "kid-1", start_date: "2026-01-05", end_date: "2026-01-06",
@@ -660,6 +721,115 @@ describe("mergeSwapRecord", () => {
       status: "cancelled", child_id: "frozen-kid", start_date: "2026-03-01",
       end_date: "2026-03-02", to_parent_id: PB,
     });
+  });
+});
+
+describe("mergeSwapRecord field by field", () => {
+  const request = {
+    id: "sw-1", requester_id: "req-row", responder_id: "resp-row",
+    child_id: "mutable-kid", start_date: "2026-02-01", end_date: "2026-02-02",
+    to_parent_id: PA, note: "mutable", status: "pending",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const snapshot = {
+    child_id: "frozen-kid", start_date: "2026-03-01", end_date: "2026-03-02", to_parent_id: PB, note: "frozen",
+  };
+
+  it("shows the request as-is when there is no agreement row yet", () => {
+    expect(mergeSwapRecord(request, undefined)).toEqual({
+      ...request, status: "pending", requester_agreed: 0, responder_agreed: 0, locked_at: null,
+    });
+    expect(mergeSwapRecord(request, null)).toEqual({
+      ...request, status: "pending", requester_agreed: 0, responder_agreed: 0, locked_at: null,
+    });
+  });
+
+  it("takes declined and cancelled from the request when the agreement is silent, and nothing else", () => {
+    expect(mergeSwapRecord({ ...request, status: "declined" }).status).toBe("declined");
+    expect(mergeSwapRecord({ ...request, status: "cancelled" }).status).toBe("cancelled");
+    expect(mergeSwapRecord({ ...request, status: "locked" }).status).toBe("pending");
+    expect(mergeSwapRecord({ ...request, status: "accepted" }).status).toBe("pending");
+    expect(mergeSwapRecord({ ...request, status: "declined" }, { status: "pending" }).status).toBe("declined");
+    // A locked agreement outranks whatever the request row says.
+    expect(mergeSwapRecord({ ...request, status: "cancelled" }, { status: "locked" }).status).toBe("locked");
+    expect(mergeSwapRecord({ ...request, status: "declined" }, { status: "cancelled" }).status).toBe("cancelled");
+  });
+
+  it("keeps the request's terms while a snapshot exists but nobody has agreed to it", () => {
+    const merged = mergeSwapRecord(request, { ...snapshot, status: "pending", requester_agreed: 0, responder_agreed: 0 });
+    expect(merged).toMatchObject({
+      child_id: "mutable-kid", start_date: "2026-02-01", end_date: "2026-02-02", to_parent_id: PA, note: "mutable",
+      status: "pending", requester_agreed: 0, responder_agreed: 0,
+    });
+  });
+
+  it("binds the snapshot once either party has agreed", () => {
+    for (const flags of [{ requester_agreed: 1, responder_agreed: 0 }, { requester_agreed: 0, responder_agreed: 1 }]) {
+      expect(mergeSwapRecord(request, { ...snapshot, status: "pending", ...flags })).toMatchObject({
+        ...snapshot, status: "pending", ...flags,
+      });
+    }
+  });
+
+  it("does not bind an agreement that carries no snapshot columns at all", () => {
+    const bare = { status: "pending", requester_agreed: 1, responder_agreed: 0,
+      child_id: null, start_date: null, end_date: null, to_parent_id: null, note: "ignored" };
+    expect(mergeSwapRecord(request, bare)).toMatchObject({
+      child_id: "mutable-kid", start_date: "2026-02-01", end_date: "2026-02-02", to_parent_id: PA, note: "mutable",
+      requester_agreed: 1,
+    });
+    // A declined or cancelled agreement without a snapshot still has no terms to impose.
+    expect(mergeSwapRecord(request, { status: "declined" })).toMatchObject({ child_id: "mutable-kid", status: "declined" });
+  });
+
+  it("binds a partial snapshot — one column is enough — with its gaps left empty", () => {
+    const partial = { status: "pending", requester_agreed: 1, child_id: null, start_date: "2026-03-01", end_date: null, to_parent_id: null };
+    const merged = mergeSwapRecord(request, partial);
+    expect(merged.start_date).toBe("2026-03-01");
+    expect(merged.child_id).toBeNull();
+    expect(merged.end_date).toBeNull();
+    expect(merged.to_parent_id).toBeNull();
+    expect(merged.note).toBeUndefined();
+  });
+
+  it("prefers the agreement's party ids and falls back to the request's", () => {
+    expect(mergeSwapRecord(request, { requester_id: PA, responder_id: PB })).toMatchObject({ requester_id: PA, responder_id: PB });
+    expect(mergeSwapRecord(request, { status: "pending" })).toMatchObject({ requester_id: "req-row", responder_id: "resp-row" });
+  });
+
+  it("dates the record from the request, then the lock, then the last update", () => {
+    const ag = { status: "locked", locked_at: "2026-01-03T00:00:00Z", updated_at: "2026-01-04T00:00:00Z" };
+    expect(mergeSwapRecord(request, ag).created_at).toBe("2026-01-01T00:00:00Z");
+    expect(mergeSwapRecord({ id: "sw-1" }, ag).created_at).toBe("2026-01-03T00:00:00Z");
+    expect(mergeSwapRecord({ id: "sw-1" }, { ...ag, locked_at: null }).created_at).toBe("2026-01-04T00:00:00Z");
+    expect(mergeSwapRecord({ id: "sw-1" }, { status: "pending" }).created_at).toBeNull();
+    expect(mergeSwapRecord({ id: "sw-1" }).created_at).toBeNull();
+  });
+
+  it("normalises the consent flags to 1/0 and carries locked_at", () => {
+    const merged = mergeSwapRecord(request, { ...snapshot, status: "locked", requester_agreed: true, responder_agreed: "1", locked_at: "2026-01-03T00:00:00Z" });
+    expect(merged.requester_agreed).toBe(1);
+    expect(merged.responder_agreed).toBe(1);
+    expect(merged.locked_at).toBe("2026-01-03T00:00:00Z");
+    expect(mergeSwapRecord(request, { status: "pending" }).locked_at).toBeNull();
+  });
+});
+
+describe("canMemberAgreeToSwap", () => {
+  const pending = { status: "pending", requester_id: PA, responder_id: PB, requester_agreed: 1, responder_agreed: 0 };
+  it("lets only the party whose flag is missing agree", () => {
+    expect(canMemberAgreeToSwap(pending, PA)).toBe(false);
+    expect(canMemberAgreeToSwap(pending, PB)).toBe(true);
+    expect(canMemberAgreeToSwap({ ...pending, requester_agreed: 0, responder_agreed: 1 }, PA)).toBe(true);
+    expect(canMemberAgreeToSwap({ ...pending, requester_agreed: 0, responder_agreed: 1 }, PB)).toBe(false);
+  });
+  it("refuses a stranger, a missing swap and a missing member", () => {
+    expect(canMemberAgreeToSwap({ ...pending, requester_agreed: 0 }, "stranger")).toBe(false);
+    expect(canMemberAgreeToSwap(null, PA)).toBe(false);
+    expect(canMemberAgreeToSwap(undefined, PB)).toBe(false);
+    expect(canMemberAgreeToSwap(pending, "")).toBe(false);
+    expect(canMemberAgreeToSwap(pending, null)).toBe(false);
+    expect(canMemberAgreeToSwap({ ...pending, status: "locked" }, PB)).toBe(false);
   });
 });
 
@@ -947,6 +1117,30 @@ describe("validateSwap", () => {
   it("rejects same requester and responder", () => {
     expect(validateSwap({ ...base, responder_id: PA }, today).ok).toBe(false);
   });
+  it("accepts a swap starting today and refuses one that started yesterday", () => {
+    expect(validateSwap({ ...base, start_date: today, end_date: today }, today)).toEqual({ ok: true });
+    expect(validateSwap({ ...base, start_date: "2026-07-03", end_date: "2026-07-05" }, today))
+      .toEqual({ ok: false, error: "Swaps can only be proposed for future dates." });
+  });
+  it("accepts a one-day swap and refuses an end one day before the start", () => {
+    expect(validateSwap({ ...base, start_date: "2026-07-10", end_date: "2026-07-10" }, today)).toEqual({ ok: true });
+    expect(validateSwap({ ...base, start_date: "2026-07-10", end_date: "2026-07-09" }, today))
+      .toEqual({ ok: false, error: "End date can't be before the start date." });
+  });
+  it("asks for a date range when either end is missing", () => {
+    const err = { ok: false, error: "Pick a date range." };
+    expect(validateSwap({ ...base, start_date: "" }, today)).toEqual(err);
+    expect(validateSwap({ ...base, end_date: "" }, today)).toEqual(err);
+    expect(validateSwap({ ...base, start_date: null, end_date: undefined }, today)).toEqual(err);
+  });
+  it("names the missing child and recipient", () => {
+    expect(validateSwap({ ...base, child_id: "" }, today)).toEqual({ ok: false, error: "Pick a child." });
+    expect(validateSwap({ ...base, to_parent_id: "" }, today)).toEqual({ ok: false, error: "Choose who should have the child." });
+    expect(validateSwap({ ...base, responder_id: PA }, today)).toEqual({ ok: false, error: "The other parent must be a different person." });
+  });
+  it("skips the past-date check when no today is given", () => {
+    expect(validateSwap({ ...base, start_date: "2020-01-01", end_date: "2020-01-02" }, null)).toEqual({ ok: true });
+  });
 });
 
 describe("fmtExchangeTime", () => {
@@ -1042,6 +1236,40 @@ describe("buildCustodyDays", () => {
     expect(new Set(a.map((r) => r.id)).size).toBe(a.length);
   });
 
+  it("writes the full row, exchange time included, for a handoff and an ordinary day", () => {
+    const rows = buildCustodyDays([schedule({ exchange_time: "18:00" })], [], opts("2026-01-11", "2026-01-12"));
+    expect(rows).toEqual([
+      { id: "kid-1:2026-01-11", child_id: "kid-1", day: "2026-01-11", parent_id: PA, from_parent_id: null,
+        is_transition: 0, exchange_time: "18:00", source: "schedule", title: "Sam with Dad", subtitle: "With Dad" },
+      { id: "kid-1:2026-01-12", child_id: "kid-1", day: "2026-01-12", parent_id: PB, from_parent_id: PA,
+        is_transition: 1, exchange_time: "18:00", source: "schedule", title: "Sam → Mom", subtitle: "Handoff 6:00 PM" },
+    ]);
+  });
+
+  it("stores a null exchange time when the schedule has none", () => {
+    const [row] = buildCustodyDays([schedule()], [], opts("2026-01-12", "2026-01-12"));
+    expect(row.exchange_time).toBeNull();
+  });
+
+  it("names children and parents by id when no resolvers are given", () => {
+    const rows = buildCustodyDays([schedule()], [], { startDate: "2026-01-11", endDate: "2026-01-12" });
+    expect(rows.map((r) => r.title)).toEqual([`kid-1 with ${PA}`, `kid-1 → ${PB}`]);
+    expect(rows.map((r) => r.subtitle)).toEqual([`With ${PA}`, "Handoff today"]);
+  });
+
+  it("does not call the first day of a schedule a handoff", () => {
+    // The day before the version takes effect resolves to nobody, so there is
+    // no parent to hand over from.
+    const rows = buildCustodyDays([schedule({ effective_from: "2026-01-12" })], [], opts("2026-01-12", "2026-01-13"));
+    expect(rows.map((r) => [r.day, r.parent_id, r.is_transition, r.from_parent_id]))
+      .toEqual([["2026-01-12", PB, 0, null], ["2026-01-13", PB, 0, null]]);
+  });
+
+  it("returns nothing for no schedules", () => {
+    expect(buildCustodyDays(null, [], opts("2026-01-05", "2026-01-06"))).toEqual([]);
+    expect(buildCustodyDays(undefined, [], opts("2026-01-05", "2026-01-06"))).toEqual([]);
+  });
+
   it("keeps children separate", () => {
     const two = [schedule(), schedule({ id: "sch-2", child_id: "kid-2", anchor_date: "2026-01-12" })];
     const rows = buildCustodyDays(two, [], opts("2026-01-05", "2026-01-06"));
@@ -1051,11 +1279,17 @@ describe("buildCustodyDays", () => {
 });
 
 describe("nextTransition", () => {
-  const days = buildCustodyDays(
-    [schedule(), schedule({ id: "sch-2", child_id: "kid-2", anchor_date: "2026-01-08" })],
-    [],
-    { startDate: "2026-01-05", endDate: "2026-02-05", childName: () => "K", parentName: () => "P" },
-  );
+  // Built in beforeAll, not at collection: a fixture that throws while the
+  // file is being collected fails no test, so Stryker scored such a mutant as
+  // surviving instead of killed.
+  let days;
+  beforeAll(() => {
+    days = buildCustodyDays(
+      [schedule(), schedule({ id: "sch-2", child_id: "kid-2", anchor_date: "2026-01-08" })],
+      [],
+      { startDate: "2026-01-05", endDate: "2026-02-05", childName: () => "K", parentName: () => "P" },
+    );
+  });
 
   it("finds the soonest handoff at or after the given date", () => {
     expect(nextTransition(days, "2026-01-06", "kid-1").day).toBe("2026-01-12");
@@ -1074,8 +1308,12 @@ describe("nextTransition", () => {
 
 describe("handoff notes ↔ custody transitions", () => {
   // kid-1 flips every 7 days from the Monday anchor: 01-12, 01-19, 01-26 …
-  const days = buildCustodyDays([schedule({ exchange_time: "18:00" })], [],
-    { startDate: "2026-01-06", endDate: "2026-02-15", childName: () => "Sam", parentName: (id) => (id === PA ? "Dad" : "Mom") });
+  // beforeAll, not collection time — see "nextTransition" above.
+  let days;
+  beforeAll(() => {
+    days = buildCustodyDays([schedule({ exchange_time: "18:00" })], [],
+      { startDate: "2026-01-06", endDate: "2026-02-15", childName: () => "Sam", parentName: (id) => (id === PA ? "Dad" : "Mom") });
+  });
   const note = (over = {}) => ({
     id: "n1", child_id: "kid-1", note_date: "2026-01-19", category: "items",
     body: "Cleats in the blue bag", created_by: PA, created_at: "2026-01-15T00:00:00Z", ...over,
@@ -1571,6 +1809,13 @@ describe("validateSwap against the horizon and the schedule", () => {
     expect(validateSwap(base, today, { schedule: sch })).toEqual({ ok: true });
   });
 
+  it("says the schedule has ended rather than that the dates fall outside it", () => {
+    expect(validateSwap(base, today, { schedule: schedule({ effective_to: "2026-07-01" }) }))
+      .toEqual({ ok: false, error: "This child's schedule has ended, so there is nothing for a swap to change." });
+    expect(validateSwap(base, today, { schedule: schedule({ effective_to: "2026-07-11" }) }))
+      .toEqual({ ok: false, error: "Those dates fall outside the agreed schedule." });
+  });
+
   it("checks nothing about the schedule when none is passed", () => {
     expect(validateSwap({ ...base, responder_id: "anyone" }, today)).toEqual({ ok: true });
   });
@@ -2060,6 +2305,185 @@ describe("holidaySpan", () => {
   });
 });
 
+describe("easterSunday", () => {
+  // Western (Gregorian) Easter, from published tables. 2008 and 2285 are among
+  // the earliest possible dates, 1943 and 2038 the latest; 1954, 1981, 2049
+  // and 2076 are the years Gauss's formula needs its two exceptions for.
+  const KNOWN = {
+    2000: [4, 23], 2001: [4, 15], 2002: [3, 31], 2003: [4, 20], 2004: [4, 11], 2005: [3, 27],
+    2006: [4, 16], 2007: [4, 8], 2008: [3, 23], 2009: [4, 12], 2010: [4, 4], 2011: [4, 24],
+    2012: [4, 8], 2013: [3, 31], 2014: [4, 20], 2015: [4, 5], 2016: [3, 27], 2017: [4, 16],
+    2018: [4, 1], 2019: [4, 21], 2020: [4, 12], 2021: [4, 4], 2022: [4, 17], 2023: [4, 9],
+    2024: [3, 31], 2025: [4, 20], 2026: [4, 5], 2027: [3, 28], 2028: [4, 16], 2029: [4, 1],
+    2030: [4, 21], 2031: [4, 13], 2032: [3, 28], 2033: [4, 17], 2034: [4, 9], 2035: [3, 25],
+    2036: [4, 13], 2037: [4, 5], 2038: [4, 25], 2039: [4, 10], 2040: [4, 1],
+    1818: [3, 22], 1900: [4, 15], 1943: [4, 25], 1954: [4, 18], 1981: [4, 19],
+    2049: [4, 18], 2076: [4, 19], 2100: [3, 28], 2285: [3, 22],
+  };
+  it.each(Object.entries(KNOWN))("Easter %s", (year, [month, day]) => {
+    expect(easterSunday(Number(year))).toEqual({ month, day });
+  });
+
+  // An independent algorithm (Knuth, TAOCP 1.3.2 ex. 14, epact-based) as the
+  // oracle across the whole Gregorian range the hub could be asked about.
+  const knuth = (Y) => {
+    const G = (Y % 19) + 1, C = Math.floor(Y / 100) + 1;
+    const X = Math.floor((3 * C) / 4) - 12, Z = Math.floor((8 * C + 5) / 25) - 5;
+    const D = Math.floor((5 * Y) / 4) - X - 10;
+    let E = (((11 * G + 20 + Z - X) % 30) + 30) % 30;
+    if ((E === 25 && G > 11) || E === 24) E += 1;
+    let N = 44 - E;
+    if (N < 21) N += 30;
+    N = N + 7 - ((D + N) % 7);
+    return N > 31 ? { month: 4, day: N - 31 } : { month: 3, day: N };
+  };
+  it("agrees with an independent algorithm for every year 1583-3000", () => {
+    const wrong = [];
+    for (let y = 1583; y <= 3000; y++) {
+      const got = easterSunday(y), want = knuth(y);
+      if (got.month !== want.month || got.day !== want.day) wrong.push(y);
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
+describe("holidaySpan edges", () => {
+  it("keeps a fifth weekday that falls on the month's last day", () => {
+    // March 31, 2026 is the fifth Tuesday.
+    expect(holidaySpan({ kind: "nth_weekday", month: 3, week: 5, weekday: 2 }, 2026)).toEqual({ start: "2026-03-31", end: "2026-03-31" });
+  });
+  it("keeps a range inside one year in that year, including a one-day range", () => {
+    const range = (start, end) => ({ kind: "range", start, end });
+    expect(holidaySpan(range({ month: 7, day: 1 }, { month: 7, day: 10 }), 2026)).toEqual({ start: "2026-07-01", end: "2026-07-10" });
+    expect(holidaySpan(range({ month: 7, day: 4 }, { month: 7, day: 4 }), 2026)).toEqual({ start: "2026-07-04", end: "2026-07-04" });
+  });
+  it("has no span for a kind it does not know", () => {
+    expect(holidaySpan({ kind: "lunar", month: 1, day: 1 }, 2026)).toBeNull();
+  });
+});
+
+describe("nextHolidayOccurrence reach", () => {
+  it("looks three years ahead, stepping over years the rule has no day", () => {
+    // February has a fifth Monday only in a leap year that starts February on
+    // a Monday: 2044 is the next after 2016, three years on from 2041.
+    const rule = { id: "m5", label: "Fifth Monday", kind: "nth_weekday", month: 2, week: 5, weekday: 1, even_years: "a", odd_years: "a" };
+    expect(nextHolidayOccurrence([rule], { a: "mom", b: "dad" }, 0, "2041-03-01")).toEqual({ start: "2044-02-29", parent_id: "mom" });
+    expect(nextHolidayOccurrence([rule], { a: "mom", b: "dad" }, 0, "2040-03-01")).toBeNull();
+  });
+});
+
+describe("holidayRuleReadable", () => {
+  const fixed = { id: "july4", label: "Independence Day", kind: "fixed", month: 7, day: 4, even_years: "a", odd_years: null };
+  it("reads a well-formed rule of each kind", () => {
+    expect(holidayRuleReadable(fixed)).toBe(true);
+    expect(holidayRuleReadable({ ...fixed, kind: "nth_weekday", day: undefined, month: 11, week: 4, weekday: 4 })).toBe(true);
+    expect(holidayRuleReadable({ ...fixed, kind: "nth_weekday", day: undefined, month: 5, week: -1, weekday: 1 })).toBe(true);
+    expect(holidayRuleReadable({ id: "e", label: "Easter", kind: "easter", offset_days: 0, even_years: "a", odd_years: "b" })).toBe(true);
+    expect(holidayRuleReadable({ id: "w", label: "Winter", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: null, odd_years: "b" })).toBe(true);
+  });
+  it("refuses anything that is not an object", () => {
+    for (const bad of [null, undefined, "rule", 7]) expect(holidayRuleReadable(bad)).toBe(false);
+  });
+  it("bounds the id and the label", () => {
+    expect(holidayRuleReadable({ ...fixed, id: "x".repeat(64) })).toBe(true);
+    expect(holidayRuleReadable({ ...fixed, id: "x".repeat(65) })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, id: "" })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, id: 5 })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, label: "x".repeat(80) })).toBe(true);
+    expect(holidayRuleReadable({ ...fixed, label: "x".repeat(81) })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, label: "" })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, label: 5 })).toBe(false);
+  });
+  it("requires both party tags to be present and a or b or null", () => {
+    expect(holidayRuleReadable({ ...fixed, even_years: "c" })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, odd_years: undefined })).toBe(false);
+  });
+  it("reads an exchange time only as a 24-hour HH:MM", () => {
+    expect(holidayRuleReadable({ ...fixed, exchange_time: "09:30" })).toBe(true);
+    expect(holidayRuleReadable({ ...fixed, exchange_time: "23:59" })).toBe(true);
+    for (const bad of ["24:00", "9:30", "x09:30", "09:30x", "09:60", 930, null]) {
+      expect(holidayRuleReadable({ ...fixed, exchange_time: bad })).toBe(false);
+    }
+  });
+  it("bounds every numeric field, whichever kind carries it", () => {
+    for (const over of [{ month: 0 }, { month: 13 }, { month: 7.5 }, { day: 0 }, { day: 32 }, { week: -2 }, { week: 6 },
+      { weekday: -1 }, { weekday: 7 }, { offset_days: 71 }, { offset_days: -71 }, { length_days: 0 }, { length_days: 32 }]) {
+      expect(holidayRuleReadable({ ...fixed, ...over })).toBe(false);
+    }
+    expect(holidayRuleReadable({ ...fixed, length_days: 31, offset_days: -70 })).toBe(true);
+  });
+  it("refuses an unreadable start or end on any kind", () => {
+    expect(holidayRuleReadable({ ...fixed, start: { month: 13, day: 1 } })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, end: { month: 1, day: 0 } })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, end: null })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, start: { month: 1, day: 1 }, end: { month: 1, day: 2 } })).toBe(true);
+  });
+  it("requires the fields each kind needs", () => {
+    expect(holidayRuleReadable({ ...fixed, day: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, month: undefined })).toBe(false);
+    const nth = { ...fixed, kind: "nth_weekday", day: undefined, month: 11, week: 4, weekday: 4 };
+    expect(holidayRuleReadable({ ...nth, month: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...nth, weekday: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...nth, week: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...nth, week: 0 })).toBe(false);
+    expect(holidayRuleReadable({ id: "e", label: "Easter", kind: "easter", even_years: "a", odd_years: "b" })).toBe(false);
+    const range = { id: "w", label: "Winter", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: "a", odd_years: "b" };
+    expect(holidayRuleReadable({ ...range, start: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...range, end: undefined })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, kind: "lunar" })).toBe(false);
+    expect(holidayRuleReadable({ ...range, kind: "lunar" })).toBe(false);
+    // A field the kind does not use is still bounded.
+    expect(holidayRuleReadable({ ...range, month: 13 })).toBe(false);
+    expect(holidayRuleReadable({ ...range, day: 32 })).toBe(false);
+    expect(holidayRuleReadable({ id: "e", label: "Easter", kind: "easter", offset_days: 0, day: 0, even_years: "a", odd_years: "b" })).toBe(false);
+    expect(holidayRuleReadable({ ...fixed, kind: undefined })).toBe(false);
+  });
+});
+
+describe("holiday proposal limits", () => {
+  const rule = (i, over = {}) => ({ id: `r${i}`, label: `Rule ${i}`, kind: "fixed", month: 1, day: 1 + (i % 28), even_years: "a", odd_years: "b", ...over });
+  it("allows exactly MAX rules and refuses one more", () => {
+    const forty = Array.from({ length: 40 }, (_, i) => rule(i));
+    expect(holidayRulesBlocker(forty)).toBeNull();
+    expect(holidayRulesBlocker([...forty, rule(40)])).toBe("A holiday schedule can hold at most 40 entries.");
+  });
+  it("allows an 80-character name and refuses 81", () => {
+    expect(holidayRulesBlocker([rule(1, { label: "x".repeat(80) })])).toBeNull();
+    expect(holidayRulesBlocker([rule(1, { label: "x".repeat(81) })])).toBe(`"${"x".repeat(81)}" is too long a name.`);
+  });
+  it("needs only one of the two years to name someone", () => {
+    expect(holidayRulesBlocker([rule(1, { odd_years: null })])).toBeNull();
+    expect(holidayRulesBlocker([rule(1, { even_years: null })])).toBeNull();
+    expect(holidayRulesBlocker([rule(1, { even_years: null, odd_years: null })])).toBe("Choose who has Rule 1, or untick it.");
+  });
+  it("refuses a range with either end unreal", () => {
+    const range = (start, end) => rule(1, { kind: "range", month: undefined, day: undefined, start, end });
+    expect(holidayRulesBlocker([range({ month: 12, day: 20 }, { month: 1, day: 3 })])).toBeNull();
+    expect(holidayRulesBlocker([range({ month: 2, day: 30 }, { month: 3, day: 3 })])).toBe("Rule 1 needs a real start and end date.");
+    expect(holidayRulesBlocker([range({ month: 2, day: 20 }, { month: 2, day: 30 })])).toBe("Rule 1 needs a real start and end date.");
+  });
+  it("is null when any party is missing or both parties are the same person", () => {
+    const terms = { child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", rules: [rule(1)] };
+    expect(holidayProposalTerms(terms)).not.toBeNull();
+    expect(holidayProposalTerms({ ...terms, child_id: "" })).toBeNull();
+    expect(holidayProposalTerms({ ...terms, parent_a_id: "" })).toBeNull();
+    expect(holidayProposalTerms({ ...terms, parent_b_id: "" })).toBeNull();
+    expect(holidayProposalTerms({ ...terms, parent_b_id: "mom" })).toBeNull();
+  });
+  it("leaves out fields the rule does not carry, rather than writing them as undefined", () => {
+    expect(Object.keys(cleanHolidayRule({ id: "x", label: "X", kind: "fixed", month: 1, day: 1, even_years: "a", odd_years: "b" })))
+      .toEqual(["id", "label", "kind", "month", "day", "even_years", "odd_years"]);
+  });
+  it("finds an odd-year-only rule's next occurrence", () => {
+    const rule = { id: "july4", label: "Independence Day", kind: "fixed", month: 7, day: 4, even_years: null, odd_years: "b" };
+    expect(nextHolidayOccurrence([rule], { a: "mom", b: "dad" }, 0, "2026-07-05")).toEqual({ start: "2027-07-04", parent_id: "dad" });
+  });
+  it("drops empty-string fields from a cleaned rule but keeps zero", () => {
+    expect(cleanHolidayRule({ id: "e", label: "Easter", kind: "easter", offset_days: 0, exchange_time: "", even_years: "a" }))
+      .toEqual({ id: "e", label: "Easter", kind: "easter", offset_days: 0, even_years: "a", odd_years: null });
+  });
+});
+
 describe("holidayForDate", () => {
   const doc = (rules) => ({ child_id: "kid", parent_a_id: "mom", parent_b_id: "dad", rules: JSON.stringify(rules) });
   const july4 = { id: "july4", label: "Independence Day", kind: "fixed", month: 7, day: 4, even_years: "a", odd_years: "b" };
@@ -2092,6 +2516,29 @@ describe("holidayForDate", () => {
     const winter = { id: "w", label: "Winter break", kind: "range", start: { month: 12, day: 20 }, end: { month: 1, day: 3 }, even_years: "a", odd_years: "b" };
     expect(holidayForDate(doc([winter]), "2027-01-02").parent_id).toBe("mom");
     expect(holidayForDate(doc([winter]), "2027-01-04")).toBeNull();
+  });
+  it("breaks a tie between equal spans in favour of the later rule", () => {
+    const a = { id: "a", label: "First", kind: "fixed", month: 12, day: 25, even_years: "a", odd_years: "a" };
+    const b = { id: "b", label: "Second", kind: "fixed", month: 12, day: 25, even_years: "b", odd_years: "b" };
+    expect(holidayForDate(doc([a, b]), "2026-12-25")).toEqual({ parent_id: "dad", rule: b });
+    expect(holidayForDate(doc([b, a]), "2026-12-25")).toEqual({ parent_id: "mom", rule: a });
+  });
+  it("measures a span by its length, not where it sits in the year", () => {
+    // The short span starts later than the long one: a winner chosen by
+    // start + end (or by start) would pick the long one.
+    const long = { id: "advent", label: "Advent", kind: "range", start: { month: 12, day: 1 }, end: { month: 12, day: 25 }, even_years: "a", odd_years: "a" };
+    const short = { id: "xmas", label: "Christmas", kind: "range", start: { month: 12, day: 24 }, end: { month: 12, day: 26 }, even_years: "b", odd_years: "b" };
+    for (const rules of [[long, short], [short, long]]) {
+      expect(holidayForDate(doc(rules), "2026-12-25")).toEqual({ parent_id: "dad", rule: short });
+      expect(holidayForDate(doc(rules), "2026-12-23")).toEqual({ parent_id: "mom", rule: long });
+    }
+  });
+  it("skips a rule with no occurrence this year instead of failing", () => {
+    // February 2026 has no fifth Monday; 2027 neither (it starts on a Monday,
+    // but has 28 days). The other rule still resolves.
+    const fifthMonday = { id: "m5", label: "Fifth Monday", kind: "nth_weekday", month: 2, week: 5, weekday: 1, even_years: "a", odd_years: "a" };
+    expect(holidayForDate(doc([fifthMonday, july4]), "2026-07-04")).toEqual({ parent_id: "mom", rule: july4 });
+    expect(holidayForDate(doc([fifthMonday]), "2026-02-23")).toBeNull();
   });
   it("is null for no document and for unreadable rules", () => {
     expect(holidayForDate(null, "2026-07-04")).toBeNull();
@@ -2273,5 +2720,389 @@ describe("journalNotes", () => {
     ];
     expect(journalNotes(log).map((e) => e.id)).toEqual(["d", "c", "b"]);
     expect(journalNotes(undefined)).toEqual([]);
+  });
+});
+
+// ── Edges pinned by mutation testing ────────────────────────────────────────
+describe("custodyKeyForDate without an anchor", () => {
+  it("resolves nobody for a missing schedule or anchor", () => {
+    expect(custodyKeyForDate(null, "2026-01-05")).toBeNull();
+    expect(custodyKeyForDate(undefined, "2026-01-05")).toBeNull();
+    expect(custodyKeyForDate(schedule({ anchor_date: null }), "2026-01-05")).toBeNull();
+    expect(custodyKeyForDate(schedule({ anchor_date: "" }), "2026-01-19")).toBeNull();
+  });
+});
+
+describe("weekday-specific cycle names", () => {
+  const midweek = CYCLE_PRESETS.find((p) => p.key === "every_other_weekend_midweek");
+  it("names the midweek preset with the nights its anchor gives it", () => {
+    expect(nameForCycle(midweek.cycle, "2026-03-02")).toBe("Every other weekend plus a midweek night (Wed, Fri–Sat)");
+  });
+  it("says nothing without an anchor to place the nights", () => {
+    expect(nameForCycle(midweek.cycle, "")).toBeNull();
+    expect(nameForCycle(midweek.cycle, undefined)).toBeNull();
+  });
+  it("finds the visiting weekdays only from a whole YYYY-MM-DD anchor", () => {
+    expect(visitingWeekdays(midweek.cycle, "2026-03-02")).toEqual([3, 5, 6]);
+    for (const bad of ["", null, "2026-03-02x", "x2026-03-02", "03/02/2026"]) {
+      expect(visitingWeekdays(midweek.cycle, bad)).toBeNull();
+    }
+    expect(visitingWeekdays([], "2026-03-02")).toBeNull();
+    expect(visitingWeekdays(["a", "b"], "2026-03-02")).toBeNull();
+  });
+});
+
+describe("swap checks on missing input", () => {
+  it("asks a stalled swap with no dates to retry", () => {
+    const stalled = { status: "pending", requester_agreed: 1, responder_agreed: 1, start_date: "2026-07-10", end_date: "2026-07-12" };
+    expect(swapStallReason({ ...stalled, start_date: null, end_date: "2020-01-01" }, "2026-07-04")).toBe("retry");
+    expect(swapStallReason({ ...stalled, start_date: "2020-01-01", end_date: "" }, "2026-07-04")).toBe("retry");
+  });
+  it("names a missing swap rather than throwing", () => {
+    expect(swapPartyIssue(null, schedule())).toBe("There is no swap to check.");
+    expect(swapPartyIssue(undefined, null)).toBe("There is no swap to check.");
+  });
+});
+
+describe("calendarCell from the record", () => {
+  const today = "2026-08-01";
+  const cell = (row) => calendarCell(schedule(), [], new Map([["2026-07-04", row]]), "2026-07-04", today, null);
+  it("labels a past holiday with its subtitle unless it was a handoff", () => {
+    expect(cell({ parent_id: PA, source: "holiday", is_transition: 0, subtitle: "Independence Day" }))
+      .toEqual({ parent_id: PA, source: "holiday", label: "Independence Day" });
+    expect(cell({ parent_id: PA, source: "holiday", is_transition: 1, subtitle: "Handoff 5:00 PM" }))
+      .toEqual({ parent_id: PA, source: "holiday", label: "" });
+    expect(cell({ parent_id: null, source: "holiday", is_transition: 0 }))
+      .toEqual({ parent_id: null, source: "holiday", label: "" });
+  });
+  it("shows an override or exception as a swap and anything else as the record", () => {
+    expect(cell({ parent_id: PA, source: "override" })).toEqual({ parent_id: PA, source: "override" });
+    expect(cell({ parent_id: PA, source: "exception" })).toEqual({ parent_id: PA, source: "override" });
+    expect(cell({ parent_id: PA, source: "cycle" })).toEqual({ parent_id: PA, source: "record" });
+  });
+});
+
+describe("monthBounds across the year end", () => {
+  it("ends December on the 31st and November on the 30th", () => {
+    expect(monthBounds(2026, 11)).toEqual({ first: "2026-12-01", last: "2026-12-31" });
+    expect(monthBounds(2026, 10)).toEqual({ first: "2026-11-01", last: "2026-11-30" });
+    expect(monthBounds(2028, 1)).toEqual({ first: "2028-02-01", last: "2028-02-29" });
+  });
+});
+
+describe("mergeBlocks across a gap", () => {
+  it("does not join the same parent's blocks across a missing day", () => {
+    expect(mergeBlocks([
+      { date: "2026-01-05", parent_id: PA },
+      { date: "2026-01-07", parent_id: PA },
+      { date: "2026-01-08", parent_id: PA },
+      { date: "2026-01-09", parent_id: PB },
+    ])).toEqual([
+      { start: "2026-01-05", end: "2026-01-05", parent_id: PA },
+      { start: "2026-01-07", end: "2026-01-08", parent_id: PA },
+      { start: "2026-01-09", end: "2026-01-09", parent_id: PB },
+    ]);
+  });
+});
+
+describe("fmtExchangeTime bounds", () => {
+  it("reads the last minute of the day and trims whitespace", () => {
+    expect(fmtExchangeTime("23:59")).toBe("11:59 PM");
+    expect(fmtExchangeTime("10:59")).toBe("10:59 AM");
+    expect(fmtExchangeTime("  17:00 ")).toBe("5:00 PM");
+    expect(fmtExchangeTime("7:05")).toBe("7:05 AM");
+  });
+  it("refuses extra characters at either end", () => {
+    expect(fmtExchangeTime("x17:00")).toBe("");
+    expect(fmtExchangeTime("17:00x")).toBe("");
+    expect(fmtExchangeTime("17:000")).toBe("");
+    expect(fmtExchangeTime("24:00")).toBe("");
+    expect(fmtExchangeTime("12:60")).toBe("");
+  });
+});
+
+describe("transition lists out of order", () => {
+  const row = (child_id, day, is_transition = 1) => ({ child_id, day, is_transition });
+  const days = [row("kid-1", "2026-01-26"), row("kid-2", "2026-01-19"), row("kid-1", "2026-01-19"),
+    row("kid-1", "2026-01-12"), row("kid-1", "2026-01-13", 0)];
+
+  it("nextTransition keeps the first of two handoffs on the same day", () => {
+    expect(nextTransition(days, "2026-01-14")).toBe(days[1]);
+    expect(nextTransition(days, "2026-01-14", "kid-1")).toBe(days[2]);
+    expect(nextTransition(null, "2026-01-14")).toBeNull();
+  });
+
+  it("upcomingTransitions sorts, filters by child and limits", () => {
+    expect(upcomingTransitions(days, "2026-01-12").map((r) => `${r.child_id}@${r.day}`))
+      .toEqual(["kid-1@2026-01-12", "kid-2@2026-01-19", "kid-1@2026-01-19", "kid-1@2026-01-26"]);
+    expect(upcomingTransitions(days, "2026-01-13", { childId: "kid-1" }).map((r) => r.day))
+      .toEqual(["2026-01-19", "2026-01-26"]);
+    expect(upcomingTransitions(days, "2026-01-01", { limit: 2 }).map((r) => r.day)).toEqual(["2026-01-12", "2026-01-19"]);
+    expect(upcomingTransitions(null, "2026-01-01")).toEqual([]);
+  });
+
+  it("recentTransitions includes the first day of the window", () => {
+    expect(recentTransitions(days, "2026-01-26").map((r) => r.day))
+      .toEqual(["2026-01-26", "2026-01-19", "2026-01-19", "2026-01-12"]);
+    expect(recentTransitions(days, "2026-01-27").map((r) => r.day)).toEqual(["2026-01-26", "2026-01-19", "2026-01-19"]);
+    expect(recentTransitions(null, "2026-01-27")).toEqual([]);
+  });
+
+  it("groupNotesByTransition orders upcoming soonest first, then past most recent first", () => {
+    const note = (id, note_date) => ({ id, child_id: "kid-1", note_date });
+    const notes = [note("past-old", "2026-01-12"), note("future-far", "2026-01-26"), note("past-new", "2026-01-19"),
+      note("today", "2026-01-19")];
+    // Today is the 19th: its handoff is still upcoming.
+    const { groups } = groupNotesByTransition(notes, days, "2026-01-19");
+    expect(groups.map((g) => [g.transition.day, g.isUpcoming, g.notes.map((n) => n.id)])).toEqual([
+      ["2026-01-19", true, ["past-new", "today"]],
+      ["2026-01-26", true, ["future-far"]],
+      ["2026-01-12", false, ["past-old"]],
+    ]);
+    const later = groupNotesByTransition(notes, days, "2026-01-27").groups;
+    expect(later.map((g) => [g.transition.day, g.isUpcoming])).toEqual([
+      ["2026-01-26", false], ["2026-01-19", false], ["2026-01-12", false],
+    ]);
+  });
+});
+
+describe("holiday presets offered ticked", () => {
+  it("ticks exactly the holidays a schedule usually names", () => {
+    expect(HOLIDAY_PRESETS.filter((p) => p.on).map((p) => p.id)).toEqual([
+      "easter", "independence-day", "halloween", "thanksgiving", "christmas-eve", "christmas-day",
+    ]);
+  });
+  it("offers Mother's and Father's Day to the same parent every year", () => {
+    expect(HOLIDAY_PRESETS.filter((p) => p.same).map((p) => p.id)).toEqual(["mothers-day", "fathers-day"]);
+  });
+});
+
+describe("fmtHandoffDay with no today", () => {
+  it("dates the day in full rather than guessing it is this week", () => {
+    expect(fmtHandoffDay("2026-10-16", null, "en-US")).toBe("Fri, Oct 16, 2026");
+    expect(fmtHandoffDay("2026-10-16", "", "en-US")).toBe("Fri, Oct 16, 2026");
+  });
+});
+
+describe("soleCoParentCandidate without a current member", () => {
+  it("offers nobody", () => {
+    const adults = [{ id: "other", hasLogin: true }];
+    expect(soleCoParentCandidate(adults, null)).toBeNull();
+    expect(soleCoParentCandidate(adults, "")).toBeNull();
+  });
+});
+
+describe("exchangeOutcome inputs it must ignore", () => {
+  const e = (id, kind, by, at, extra = {}) => ({ id, child_id: "kid", day: "2026-10-01", kind, created_by: by, created_at: at, ...extra });
+  it("is exactly empty when unrecorded", () => {
+    expect(exchangeOutcome(null, "kid", "2026-10-01")).toEqual({
+      state: "unrecorded", entries: [], responses: [], standing: [], current: [], acknowledged: false,
+    });
+  });
+  it("reads only that child's entries on that day", () => {
+    const log = [e("1", "exchange_late", "a", "t1"),
+      { ...e("2", "exchange_missed", "b", "t2"), day: "2026-10-02" },
+      { ...e("3", "exchange_missed", "b", "t3"), child_id: "sibling" }];
+    const o = exchangeOutcome(log, "kid", "2026-10-01");
+    expect(o.state).toBe("exchange_late");
+    expect(o.entries.map((x) => x.id)).toEqual(["1"]);
+  });
+  it("takes each author's latest entry by time, not by list order", () => {
+    const log = [e("2", "exchange_late", "a", "t2"), e("1", "exchange_as_planned", "a", "t1")];
+    const o = exchangeOutcome(log, "kid", "2026-10-01");
+    expect(o.state).toBe("exchange_late");
+    expect(o.standing.map((x) => x.id)).toEqual(["2"]);
+  });
+  it("counts only acknowledgements and disputes of an outcome entry as responses", () => {
+    const log = [e("1", "exchange_late", "a", "t1"),
+      e("2", "comment", "b", "t2", { responds_to_id: "1" }),
+      e("3", "acknowledge", "b", "t3", { responds_to_id: "elsewhere" }),
+      e("4", "child_with", "b", "t4", { responds_to_id: "1", parent_id: "pa" })];
+    const o = exchangeOutcome(log, "kid", "2026-10-01");
+    expect(o.responses).toEqual([]);
+    expect(o.current).toEqual([]);
+    expect(o.state).toBe("exchange_late");
+    expect(o.acknowledged).toBe(false);
+  });
+  it("keeps an author's answer to their own entry on the record but lets it settle nothing", () => {
+    const log = [e("1", "exchange_late", "a", "t1"), e("2", "acknowledge", "a", "t2", { responds_to_id: "1" })];
+    const o = exchangeOutcome(log, "kid", "2026-10-01");
+    expect(o.responses.map((x) => x.id)).toEqual(["2"]);
+    expect(o.current).toEqual([]);
+    expect(o.acknowledged).toBe(false);
+  });
+  it("takes the other parent at their latest answer by time, not by list order", () => {
+    const base = e("1", "exchange_late", "a", "t1");
+    const ack = e("3", "acknowledge", "b", "t3", { responds_to_id: "1" });
+    const dispute = e("2", "dispute", "b", "t2", { responds_to_id: "1" });
+    const o = exchangeOutcome([base, ack, dispute], "kid", "2026-10-01");
+    expect(o.state).toBe("exchange_late");
+    expect(o.acknowledged).toBe(true);
+    expect(o.current.map((x) => x.id)).toEqual(["3"]);
+  });
+  it("drops an acknowledgement of a replaced entry, even one making the same claim", () => {
+    const log = [e("1", "exchange_late", "a", "t1"), e("2", "acknowledge", "b", "t2", { responds_to_id: "1" }),
+      e("3", "exchange_late", "a", "t3")];
+    const o = exchangeOutcome(log, "kid", "2026-10-01");
+    expect(o.current).toEqual([]);
+    expect(o.acknowledged).toBe(false);
+  });
+});
+
+describe("actualParentForDay inputs it must ignore", () => {
+  const f = (id, extra = {}) => ({ id, child_id: "kid", day: "2026-10-03", kind: "child_with", parent_id: "pa", created_by: "a", created_at: id, ...extra });
+  it("reads only child_with facts that name a parent, for that child and day", () => {
+    expect(actualParentForDay([f("1", { kind: "exchange_late" })], "kid", "2026-10-03")).toBeNull();
+    expect(actualParentForDay([f("1", { parent_id: null })], "kid", "2026-10-03")).toBeNull();
+    expect(actualParentForDay([f("1", { child_id: "sibling" })], "kid", "2026-10-03")).toBeNull();
+    expect(actualParentForDay([f("1", { day: "2026-10-04" })], "kid", "2026-10-03")).toBeNull();
+    expect(actualParentForDay(null, "kid", "2026-10-03")).toBeNull();
+    const one = f("1");
+    expect(actualParentForDay([one], "kid", "2026-10-03")).toEqual({ parent_id: "pa", disputed: false, entries: [one] });
+  });
+});
+
+describe("parentingTimeSummary rows it must ignore", () => {
+  it("skips other children, other months and unassigned days", () => {
+    const days = [
+      { child_id: "kid", day: "2026-10-01", parent_id: "pa" },
+      { child_id: "kid", day: "2026-10-02", parent_id: null },
+      { child_id: "sibling", day: "2026-10-03", parent_id: "pb" },
+      { child_id: "kid", day: "2026-11-01", parent_id: "pb" },
+    ];
+    const s = parentingTimeSummary(days, [], "kid", "2026-10");
+    expect([...s.byParent.entries()]).toEqual([["pa", { planned: 1, recorded: 1 }]]);
+    expect(s).toMatchObject({ recorded: 0, disputed: 0 });
+  });
+});
+
+describe("mergeScheduleVersion field by field", () => {
+  const amendment = { id: "row", child_id: "kid", pattern: "custom", cycle: '["a","b"]', anchor_date: "2026-03-02", household_b_id: "hh-row" };
+  it("binds on any one frozen term column", () => {
+    // Only `pattern` frozen: still bound, so the amendment's anchor does not leak through.
+    const merged = mergeScheduleVersion(amendment, { status: "pending", pattern: "alternating_weeks", cycle: null, anchor_date: null });
+    expect(merged.pattern).toBe("alternating_weeks");
+    expect(merged.anchor_date).toBeNull();
+    expect(merged.cycle).toBeNull();
+  });
+  it("takes the agreement's id and seat over the amendment's, and falls back in order", () => {
+    expect(mergeScheduleVersion(amendment, { id: "ag", status: "pending", household_b_id: "hh-ag" }))
+      .toMatchObject({ id: "ag", household_b_id: "hh-ag" });
+    expect(mergeScheduleVersion(amendment, { status: "pending" })).toMatchObject({ id: "row", household_b_id: "hh-row" });
+    expect(mergeScheduleVersion({ id: "row" }, { status: "pending" }).household_b_id).toBeNull();
+  });
+  it("carries countersigned_at, null when absent", () => {
+    expect(mergeScheduleVersion(amendment, { status: "agreed", countersigned_at: "2026-03-05T00:00:00Z" }).countersigned_at)
+      .toBe("2026-03-05T00:00:00Z");
+    expect(mergeScheduleVersion(amendment, { status: "agreed" }).countersigned_at).toBeNull();
+  });
+});
+
+describe("snapshots of a missing version", () => {
+  it("are all nulls rather than a throw", () => {
+    expect(Object.values(scheduleSnapshot(undefined)).every((v) => v === null)).toBe(true);
+    expect(Object.keys(scheduleSnapshot(null))).toHaveLength(14);
+    expect(holidaySnapshot(undefined)).toEqual({
+      proposed_by: null, child_id: null, parent_a_id: null, parent_b_id: null, rules: null, rationale: null, base_version_id: null,
+    });
+  });
+  it("copies exactly the holiday snapshot columns, nulling the missing ones", () => {
+    expect(holidaySnapshot({ child_id: "kid", rules: "[]", rationale: "", extra: "dropped", parent_a_id: undefined })).toEqual({
+      proposed_by: null, child_id: "kid", parent_a_id: null, parent_b_id: null, rules: "[]", rationale: "", base_version_id: null,
+    });
+  });
+});
+
+describe("mergeHolidayVersion field by field", () => {
+  const amendment = { id: "row", household_b_id: "hh-row", rules: "[]" };
+  it("takes the agreement's id and seat over the amendment's, and falls back in order", () => {
+    expect(mergeHolidayVersion(amendment, { id: "ag", status: "pending", household_b_id: "hh-ag" }))
+      .toMatchObject({ id: "ag", household_b_id: "hh-ag" });
+    expect(mergeHolidayVersion(amendment, { status: "pending" })).toMatchObject({ id: "row", household_b_id: "hh-row" });
+    expect(mergeHolidayVersion({ id: "row" }, { status: "pending" }).household_b_id).toBeNull();
+    expect(mergeHolidayVersion({ id: "row" }).household_b_id).toBeNull();
+  });
+  it("carries countersigned_at, null when absent", () => {
+    expect(mergeHolidayVersion(amendment, { status: "agreed", countersigned_at: "2026-03-05T00:00:00Z" }).countersigned_at)
+      .toBe("2026-03-05T00:00:00Z");
+    expect(mergeHolidayVersion(amendment, { status: "agreed" }).countersigned_at).toBeNull();
+  });
+});
+
+describe("signature and stance edges", () => {
+  const version = { proposed_by: PA, parent_a_id: PA, parent_b_id: PB, household_a_agreed: 1, household_b_agreed: 0 };
+  it("names the parent who has not signed a one-signature version", () => {
+    expect(unilateralStance(version, PA)).toBe("signer");
+    expect(unilateralStance(version, PB)).toBe("unsigned_parent");
+    expect(unilateralStance({ ...version, proposed_by: PB }, PA)).toBe("unsigned_parent");
+    expect(unilateralStance(version, "step-parent")).toBeNull();
+    expect(unilateralStance({ ...version, household_b_agreed: 1 }, PB)).toBeNull();
+  });
+  it("reads a missing version as one signature", () => {
+    expect(versionSignatures(null)).toBe("one");
+    expect(versionSignatures({ household_a_agreed: 1 })).toBe("one");
+  });
+  it("amendmentStance: nothing to sign, and both already signed", () => {
+    expect(amendmentStance(null, PA)).toBe("unsigned");
+    const both = { proposed_by: PA, household_a_agreed: 1, household_b_agreed: 1 };
+    expect(amendmentStance(both, PA)).toBe("unsigned");
+    expect(amendmentStance(both, PB)).toBe("unsigned");
+  });
+  it("a draft can be signed like a pending amendment, an agreed one cannot", () => {
+    const draft = { status: "draft", proposed_by: PA, household_a_agreed: 0, household_b_agreed: 0 };
+    expect(canSignAmendment(draft, PA)).toBe(true);
+    expect(canSignAmendment({ ...draft, status: "pending" }, PA)).toBe(true);
+    expect(canSignAmendment({ ...draft, status: "agreed" }, PA)).toBe(false);
+    expect(canSignAmendment(null, PA)).toBe(false);
+  });
+});
+
+describe("open amendments", () => {
+  it("finds the newest pending or draft amendment for the child, whatever the list order", () => {
+    const old = { id: "old", child_id: "kid", status: "pending", created_at: "2026-01-01T00:00:00Z" };
+    const fresh = { id: "new", child_id: "kid", status: "draft", created_at: "2026-02-01T00:00:00Z" };
+    const other = { id: "other", child_id: "sib", status: "draft", created_at: "2026-03-01T00:00:00Z" };
+    expect(openAmendment([old, fresh, other], "kid").id).toBe("new");
+    expect(openAmendment([fresh, old, other], "kid").id).toBe("new");
+    expect(openAmendment([fresh], "kid").id).toBe("new");
+    expect(openAmendment([{ ...old, status: "agreed" }], "kid")).toBeNull();
+    expect(openAmendment(null, "kid")).toBeNull();
+    expect(agreedVersion(null, "kid")).toBeNull();
+  });
+  it("orders a row with no created_at last", () => {
+    const undated = { id: "undated", child_id: "kid", status: "pending" };
+    const dated = { id: "dated", child_id: "kid", status: "pending", created_at: "2026-01-01T00:00:00Z" };
+    expect(openAmendment([undated, dated], "kid").id).toBe("dated");
+    expect(openAmendment([dated, undated], "kid").id).toBe("dated");
+  });
+});
+
+describe("scheduleNoticeAudience without a login", () => {
+  it("skips an admin who cannot sign in, and falls back to every other adult", () => {
+    const me = { id: "me", role: "adult", isAdmin: true, hasLogin: true };
+    const noLogin = { id: "ghost", role: "adult", isAdmin: true, hasLogin: false };
+    const plain = { id: "plain", role: "adult", isAdmin: false, hasLogin: true };
+    expect(scheduleNoticeAudience([me, noLogin, plain], "me")).toEqual(["ghost", "plain"]);
+    expect(scheduleNoticeAudience(null, "me")).toEqual([]);
+  });
+});
+
+describe("describeScheduleChange of the timezone", () => {
+  it("names a change of timezone", () => {
+    expect(describeScheduleChange(schedule({ timezone: "America/Denver" }), schedule({ timezone: "America/New_York" })))
+      .toBe("the timezone custody days are counted in");
+  });
+});
+
+describe("draft terms edges", () => {
+  const draft = { child_id: "kid", parent_a_id: PA, parent_b_id: PB, pattern: "custom", cycle: '["a","b"]', anchor_date: "2026-03-02", timezone: "UTC" };
+  it("keeps the rationale and base version, null when absent", () => {
+    expect(scheduleProposalTerms({ ...draft, rationale: "school run", base_version_id: "v1" }, null))
+      .toMatchObject({ rationale: "school run", base_version_id: "v1" });
+    expect(scheduleProposalTerms(draft, null)).toMatchObject({ rationale: null, base_version_id: null });
+  });
+  it("has no terms and a reason for no draft", () => {
+    expect(scheduleProposalTerms(null, "UTC")).toBeNull();
+    expect(draftSendBlocker(null, null, "UTC")).toBe("There is no draft to send.");
   });
 });

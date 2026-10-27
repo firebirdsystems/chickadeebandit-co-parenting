@@ -182,3 +182,66 @@ describe("collapseByExchange", () => {
     expect(collapseByExchange(rows).map((g) => g.rows.map((r) => r.id))).toEqual([["a"], ["b"]]);
   });
 });
+
+describe("exchange edges", () => {
+  it("keeps apart exchanges that differ only in who hands over, or only in who receives", () => {
+    const groups = groupExchanges([
+      t("emma", "2026-10-23"),
+      t("leo", "2026-10-23", { from_parent_id: "grandma" }),
+      t("sam", "2026-10-23", { parent_id: "grandma" }),
+    ]);
+    expect(groups.map((g) => g.child_ids)).toEqual([["emma"], ["leo"], ["sam"]]);
+  });
+
+  it("holds each grouped transition once, in arrival order", () => {
+    const emma = t("emma", "2026-10-23"), leo = t("leo", "2026-10-23");
+    const [g] = groupExchanges([emma, leo, t("emma", "2026-10-23")]);
+    expect(g.transitions).toEqual([emma, leo]);
+    expect(g).toMatchObject({ zone: null, exchange_time: "17:00" });
+  });
+
+  it("finds no zone for a missing transition or a version kept without an id", () => {
+    expect(transitionTimeZone(null, [{ id: "v1", timezone: "UTC" }], "UTC")).toBeUndefined();
+    expect(transitionTimeZone(t("emma", "2026-10-01"), [{ timezone: "America/Denver" }], "UTC")).toBeUndefined();
+  });
+
+  it("reads the agreed time only as a whole HH:MM", () => {
+    for (const bad of ["x17:00", "17:00x", "7:00", "17:0"]) {
+      expect(minutesFromAgreed("2026-10-23T23:19:00Z", "2026-10-23", bad, "America/Denver")).toBeNull();
+    }
+  });
+
+  it("says nothing for an unreadable check-in time", () => {
+    expect(minutesFromAgreed("nonsense", "2026-10-23", "17:00", "America/Denver")).toBeNull();
+  });
+
+  it("counts exactly six hours past midnight, and not two days on", () => {
+    // Agreed 23:30 Denver (MDT, UTC−6). 05:30 the next day is 11:30 UTC: 360 minutes.
+    expect(minutesFromAgreed("2026-10-24T11:30:00Z", "2026-10-23", "23:30", "America/Denver")).toBe(360);
+    expect(minutesFromAgreed("2026-10-24T11:31:00Z", "2026-10-23", "23:30", "America/Denver")).toBeNull();
+    // 00:10 two nights later is not "40 minutes late".
+    expect(minutesFromAgreed("2026-10-25T06:10:00Z", "2026-10-23", "23:30", "America/Denver")).toBeNull();
+  });
+
+  it("states an hour as hours, and nothing for a non-number", () => {
+    expect(describeArrival(60)).toBe("1 h after the agreed time");
+    expect(describeArrival(59)).toBe("59 min after the agreed time");
+    expect(describeArrival(Number.NaN)).toBe("");
+    expect(describeArrival(Infinity)).toBe("");
+    expect(describeArrival(undefined)).toBe("");
+  });
+
+  it("has no check-ins for no exchange", () => {
+    const log = [{ id: "1", kind: CHECKIN_KIND, day: "2026-10-23", created_by: "mom", child_id: "emma", created_at: "t1" }];
+    expect(exchangeCheckins(log, null)).toEqual([]);
+    expect(exchangeCheckins(null, { day: "2026-10-23", child_ids: ["emma"] })).toEqual([]);
+  });
+
+  it("lists a child once when one exchange recorded it twice", () => {
+    const row = (id, child_id) => ({ id, child_id, created_by: "mom", exchange_id: "x1" });
+    const [g, ...rest] = collapseByExchange([row("1", "emma"), row("2", "emma"), row("3", "leo")]);
+    expect(rest).toEqual([]);
+    expect(g.child_ids).toEqual(["emma", "leo"]);
+    expect(g.rows.map((r) => r.id)).toEqual(["1", "2", "3"]);
+  });
+});
