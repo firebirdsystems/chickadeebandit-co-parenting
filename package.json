@@ -7,7 +7,8 @@
     "build": "node build.mjs",
     "dev": "node dev.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "mutation": "npm install --no-save --no-audit --no-fund @stryker-mutator/core@10.0.0 @stryker-mutator/vitest-runner@10.0.0 && stryker run"
   },
   "license": "MIT",
   "devDependencies": {

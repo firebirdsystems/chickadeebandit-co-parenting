@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Mutation testing for src/logic.js. Run it with `npm run mutation`.",
+    "",
+    "Why: logic.js holds custody schedules, exchange times and the holiday overrides that decide which home a child is in. Line coverage shows those lines ran; a surviving",
+    "mutant shows no test depended on them.",
+    "",
+    "Stryker is NOT a dependency: `npm run mutation` installs it with --no-save, so",
+    "package.json and the lockfile stay untouched. It runs in Stryker's sandbox",
+    "(a copy under .stryker-tmp/), so it is safe beside uncommitted work.",
+    "",
+    "`break` is a RATCHET set just under the measured score. Raise it when the score",
+    "rises; never lower it. Not part of preflight.sh: run it by hand after changing",
+    "Measured 85.11% on 2026-10-27 (2469 killed / 355 survived / 77 no-coverage of 2901); break set to 85.",
+    "logic.js or its tests."
+  ],
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.config.mjs"
+  },
+  "coverageAnalysis": "perTest",
+  "mutate": [
+    "src/logic.js"
+  ],
+  "ignorePatterns": [
+    "dist",
+    "graft",
+    ".mutation"
+  ],
+  "reporters": [
+    "progress-append-only",
+    "html",
+    "json",
+    "clear-text"
+  ],
+  "clearTextReporter": {
+    "maxTestsToLog": 0,
+    "allowEmojis": false
+  },
+  "htmlReporter": {
+    "fileName": ".mutation/report.html"
+  },
+  "jsonReporter": {
+    "fileName": ".mutation/report.json"
+  },
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "logLevel": "info",
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": 85
+  }
+}
